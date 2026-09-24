@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"evasimilar/internal/config"
 	"evasimilar/internal/embed"
@@ -36,7 +37,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	log.Info("starting batch index",
+	log.Info("starting continuous indexer",
 		"rpc_url", cfg.EvaRPCURL,
 		"collection", cfg.QdrantCollection,
 		"embed_provider", cfg.EmbedProvider,
@@ -44,9 +45,24 @@ func main() {
 		"recreate", cfg.IndexerRecreate,
 	)
 
-	if err := svc.IndexAll(ctx); err != nil {
-		log.Error("batch index failed", "err", err)
-		os.Exit(1)
+	for {
+		if err := svc.IndexAll(ctx); err != nil {
+			if ctx.Err() != nil {
+				break
+			}
+			log.Error("index scan failed; retrying in one minute", "err", err)
+		}
+		if ctx.Err() != nil {
+			break
+		}
+		timer := time.NewTimer(time.Minute)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			log.Info("indexer stopped")
+			return
+		case <-timer.C:
+		}
 	}
-	log.Info("batch index finished")
+	log.Info("indexer stopped")
 }

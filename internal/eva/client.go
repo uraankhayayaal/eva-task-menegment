@@ -23,7 +23,7 @@ import (
 //	{"jsonrpc":"2.2","method":"CmfTask.list","callid":"<uuid>","kwargs":{...}}
 //
 // kwargs carries filter (array of [field, op, value] triples), fields, slice
-// ([offset, limit]), order_by and include_archived.
+// (the half-open range [start, end)), order_by and include_archived.
 type Client struct {
 	rpcURL     string
 	authHeader string

@@ -4,35 +4,64 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 )
 
 // ListResult is the expected shape of a list call result. Depending on the
 // Eva endpoint the list may come back as a bare array or as an object with
 // "items"/"rows". We accept both and return []map[string]any.
 type ListResult struct {
-	Total int               `json:"total,omitempty"`
-	Items []any             `json:"items,omitempty"`
-	Rows  []any             `json:"rows,omitempty"`
-	Data  []any             `json:"data,omitempty"`
-	List  []any             `json:"list,omitempty"`
+	Total int   `json:"total,omitempty"`
+	Items []any `json:"items,omitempty"`
+	Rows  []any `json:"rows,omitempty"`
+	Data  []any `json:"data,omitempty"`
+	List  []any `json:"list,omitempty"`
 }
 
 // ListTasks fetches one page of tasks via CmfTask.list. kwargs:
 //
-//	{filter: [[f,op,v],...], slice: [offset, limit], include_archived: false}
-func ListTasks(ctx context.Context, c *Client, method string, filterTriples []any, offset, limit int) ([]map[string]any, int, error) {
+//	{filter: [[f,op,v],...], fields: [...], slice: [start, end], include_archived: false}
+//
+// fields requests explicit attributes (e.g. "text") which the list endpoint
+// omits by default otherwise.
+func ListTasks(ctx context.Context, c *Client, method string, filterTriples []any, fields []string, offset, limit int) ([]map[string]any, int, error) {
 	kwargs := map[string]any{
-		"slice":            []any{offset, limit},
-		"include_archived": false,
+		// EVA interprets slice as a half-open [start, end) range, not
+		// [offset, limit]. Passing [100, 100] therefore returns no rows.
+		"slice": []any{offset, offset + limit},
+		// The indexer should cover the full task history, including archived
+		// tasks; otherwise Eva may report only the active subset.
+		"include_archived": true,
 	}
 	if len(filterTriples) > 0 {
 		kwargs["filter"] = filterTriples
+	}
+	if len(fields) > 0 {
+		kwargs["fields"] = fields
 	}
 	raw, err := c.Call(ctx, method, kwargs)
 	if err != nil {
 		return nil, 0, err
 	}
 	return decodeItems(raw)
+}
+
+// CountTasks returns the count for the same filters used by ListTasks.
+func CountTasks(ctx context.Context, c *Client, listMethod string, filterTriples []any) (int64, error) {
+	method := strings.TrimSuffix(listMethod, ".list") + ".count"
+	kwargs := map[string]any{"include_archived": true}
+	if len(filterTriples) > 0 {
+		kwargs["filter"] = filterTriples
+	}
+	raw, err := c.Call(ctx, method, kwargs)
+	if err != nil {
+		return 0, err
+	}
+	var count int64
+	if err := json.Unmarshal(raw, &count); err != nil {
+		return 0, fmt.Errorf("decode %s count result: %w", method, err)
+	}
+	return count, nil
 }
 
 // GetTask fetches a single task via CmfTask.get with
@@ -57,9 +86,14 @@ func GetTask(ctx context.Context, c *Client, method, filterField string, id any)
 
 // ListComments returns the comments of a task via CmfComment.list with
 // filter = [[parent, "==", commentParentPrefix+id]].
-func ListComments(ctx context.Context, c *Client, method, commentParentPrefix string, taskID any) ([]map[string]any, error) {
-	filter := []any{[]any{"parent", "==", commentParentPrefix + fmt.Sprint(taskID)}}
-	raw, err := c.Call(ctx, method, map[string]any{"filter": filter})
+func ListComments(ctx context.Context, c *Client, method, commentParentPrefix string, fields []string, taskID any) ([]map[string]any, error) {
+	kwargs := map[string]any{
+		"filter": []any{[]any{"parent", "==", commentParentPrefix + fmt.Sprint(taskID)}},
+	}
+	if len(fields) > 0 {
+		kwargs["fields"] = fields
+	}
+	raw, err := c.Call(ctx, method, kwargs)
 	if err != nil {
 		return nil, err
 	}

@@ -41,6 +41,83 @@ type apiResponse struct {
 	Error  string          `json:"error"`
 }
 
+// ExistingTaskIDs returns task IDs found in point payloads. It scrolls through
+// the collection once, which lets the indexer filter an Eva page without one
+// Qdrant request per task.
+func (c *Client) ExistingTaskIDs(ctx context.Context, name string) (map[string]struct{}, error) {
+	type scrollPoint struct {
+		Payload map[string]any `json:"payload"`
+	}
+	type scrollResult struct {
+		Points         []scrollPoint   `json:"points"`
+		NextPageOffset json.RawMessage `json:"next_page_offset"`
+	}
+	type scrollResponse struct {
+		Result scrollResult `json:"result"`
+		Error  string       `json:"error"`
+	}
+
+	ids := make(map[string]struct{})
+	var offset json.RawMessage
+	for {
+		body := map[string]any{
+			"limit":        1000,
+			"with_payload": []string{"eva_id"},
+			"with_vector":  false,
+		}
+		if len(offset) > 0 && string(offset) != "null" {
+			var value any
+			if err := json.Unmarshal(offset, &value); err != nil {
+				return nil, fmt.Errorf("decode qdrant scroll offset: %w", err)
+			}
+			body["offset"] = value
+		}
+		raw, err := c.doRaw(ctx, http.MethodPost, "/collections/"+name+"/points/scroll", body)
+		if err != nil {
+			return nil, err
+		}
+		var resp scrollResponse
+		if err := json.Unmarshal(raw, &resp); err != nil {
+			return nil, err
+		}
+		if resp.Error != "" {
+			return nil, fmt.Errorf("qdrant scroll: %s", resp.Error)
+		}
+		for _, point := range resp.Result.Points {
+			if id := fmt.Sprint(point.Payload["eva_id"]); id != "" && id != "<nil>" {
+				ids[id] = struct{}{}
+			}
+		}
+		if len(resp.Result.NextPageOffset) == 0 || string(resp.Result.NextPageOffset) == "null" {
+			break
+		}
+		offset = resp.Result.NextPageOffset
+	}
+	return ids, nil
+}
+
+// CountPoints returns the exact number of points stored in a collection.
+func (c *Client) CountPoints(ctx context.Context, name string) (uint64, error) {
+	body := map[string]any{"exact": true}
+	raw, err := c.doRaw(ctx, http.MethodPost, "/collections/"+name+"/points/count", body)
+	if err != nil {
+		return 0, err
+	}
+	var resp struct {
+		Result struct {
+			Count uint64 `json:"count"`
+		} `json:"result"`
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return 0, err
+	}
+	if resp.Error != "" {
+		return 0, fmt.Errorf("qdrant count points: %s", resp.Error)
+	}
+	return resp.Result.Count, nil
+}
+
 // EnsureCollection creates the collection if it does not already exist.
 func (c *Client) EnsureCollection(ctx context.Context, name string, dim int, distance string) error {
 	// Check existence
@@ -73,16 +150,17 @@ func (c *Client) Upsert(ctx context.Context, name string, points []Point) error 
 }
 
 // Search returns the top-n most similar points above the given score
-// threshold (cosine similarity), excluding the provided point id (self).
-func (c *Client) Search(ctx context.Context, name string, vector []float32, limit int, threshold float64, excludeID uint64) ([]ScoredPoint, error) {
+// threshold (cosine similarity), excluding the provided point ids (self —
+// all chunk points of the querying task).
+func (c *Client) Search(ctx context.Context, name string, vector []float32, limit int, threshold float64, excludeIDs []uint64) ([]ScoredPoint, error) {
 	if limit <= 0 {
 		limit = 5
 	}
 	f := map[string]any{}
-	if excludeID != 0 {
+	if len(excludeIDs) > 0 {
 		f = map[string]any{
 			"must_not": []any{
-				map[string]any{"has_id": []uint64{excludeID}},
+				map[string]any{"has_id": excludeIDs},
 			},
 		}
 	}

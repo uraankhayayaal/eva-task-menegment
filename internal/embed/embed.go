@@ -18,6 +18,7 @@ type Client struct {
 	teiURL    string
 	dim       int
 	http      *http.Client
+	requests  chan struct{}
 }
 
 type OllamaEmbedRequest struct {
@@ -37,6 +38,7 @@ func New(provider, ollamaURL, model, teiURL string, dim int) *Client {
 		teiURL:    teiURL,
 		dim:       dim,
 		http:      &http.Client{Timeout: 120 * time.Second},
+		requests:  make(chan struct{}, 4),
 	}
 }
 
@@ -46,6 +48,12 @@ func (c *Client) Dim() int { return c.dim }
 func (c *Client) Embed(ctx context.Context, inputs []string) ([][]float32, error) {
 	if len(inputs) == 0 {
 		return nil, nil
+	}
+	select {
+	case c.requests <- struct{}{}:
+		defer func() { <-c.requests }()
+	case <-ctx.Done():
+		return nil, ctx.Err()
 	}
 	switch c.provider {
 	case "tei":

@@ -14,7 +14,7 @@ Eva webhook ────────► listener ──► embed + vector search
 
 | Binary          | Role                                                                |
 |-----------------|---------------------------------------------------------------------|
-| `cmd/indexer`   | Batch reads all tasks (+ comments) from Eva, embeds and upserts them |
+| `cmd/indexer`   | Continuously reads new tasks (+ comments) from Eva and upserts them |
 | `cmd/listener`  | HTTP webhook server: on a new task, finds similar ones and links them |
 
 ## Prerequisites
@@ -40,32 +40,35 @@ go run ./cmd/indexer
 # 2) run the listener
 go run ./cmd/listener
 
-# point Eva's webhook at http://<host>:8080/webhook/task
+# point Eva's webhook at http://<host>:8480/webhook/task
 ```
 
 Manual triggers (useful while wiring webhooks):
 ```bash
-curl http://localhost:8080/index/<task_id>   # index a single task
-curl http://localhost:8080/link/<task_id>    # index + find + link similar
-curl http://localhost:8080/healthz
+curl http://localhost:8480/index/<task_id>   # index a single task
+curl http://localhost:8480/link/<task_id>    # index + find + link similar
+curl http://localhost:8480/healthz
 ```
 
 ## How it works
 
-1. `indexer` pages through Eva tasks via
-   `POST <EVA_RPC_URL>/?m=CmfTask.list` (kwargs: `filter`, `slice`, `order_by`),
-   fetches each task's comments via `CmfComment.list` (filter
-   `parent == CmfTask:<id>`), builds the embedding text
-   `name + text + result + comments`, embeds it in batches and upserts the
-   vector with metadata into the Qdrant collection `eva_tasks` (point id =
-   hash of the Eva task id, payload keeps `eva_id`/`code`).
+1. `indexer` continuously pages through Eva tasks via
+   `POST <EVA_RPC_URL>/?m=CmfTask.list` (kwargs: `filter`, `fields`, `slice`, `order_by`),
+   compares task IDs with Qdrant and skips tasks that are already indexed,
+   fetches new tasks' comments via `CmfComment.list` (filter
+   `parent == CmfTask:<id>`), chunks the text (`name + text + result +
+   comments`) semantically, embeds each chunk and upserts the points into the
+   Qdrant collection `eva_tasks` (point id = hash of task id + chunk index,
+   payload keeps `eva_id`/`code`/`chunk_index`).
+   After a complete scan it waits one minute and checks Eva again, so newly
+   created tasks are picked up without restarting the process.
 2. `listener` accepts `POST /webhook/task`. It extracts the task id from the
    payload (`LISTENER_TASK_ID_PATH`, dotted path, e.g. `task.id`), indexes the
-   task, then runs a Qdrant cosine search for the closest tasks above
-   `LISTENER_SCORE_THRESHOLD`. It links each result in Eva via
-   `CmfRelationOption.create` with kwargs
-   `{out_link, in_link, relation_type}` and records the link in the point
-   payload to avoid duplicates. With `LINKS_DRY_RUN=true` (default) it only
+   task, then runs a Qdrant cosine search with every chunk of the new task for
+   the closest tasks above `LISTENER_SCORE_THRESHOLD` (best score per task).
+   It links each result in Eva via `CmfRelationOption.create` with kwargs
+   `{out_link, in_link, relation_type}` and records the link in the chunk
+   payloads to avoid duplicates. With `LINKS_DRY_RUN=true` (default) it only
    logs.
 
 ## Eva API wiring
@@ -74,7 +77,7 @@ The client speaks the JSON-RPC 2.2 dialect from the official OpenAPI spec
 `oas_evateam_v1_9_22.json`: `POST {EVA_RPC_URL}/?m=<Model>.<method>` with a
 body of `{"jsonrpc":"2.2","method":...,"callid":"<uuid>","kwargs":{...}}`.
 `kwargs` carries `filter` (array of `[field, op, value]` triples),
-`fields`, `slice` (`[offset, limit]`), `order_by` and `include_archived`.
+`fields`, `slice` (the half-open range `[start, end)`), `order_by` and `include_archived`.
 Everything instance-specific is config:
 
 | Variable | Default | Notes |
@@ -114,12 +117,32 @@ The startup log prints `auth=` so you can verify which scheme was picked.
 `/webhook/task`, `/index/<id>` and `/link/<id>` endpoints return `401`
 otherwise.
 
-## Embedding
+## Embedding & chunking
 
 `EMBED_PROVIDER=ollama` (default) uses
 `POST <OLLAMA_URL>/api/embed` (`{"model": ..., "input": [...]}`).
 `EMBED_PROVIDER=tei` uses `POST <TEI_URL>/embed`
 (`{"inputs": ["..."]}`). Set `EMBED_DIM` to match your model.
+
+With `EMBED_CHUNKING=semantic` (default) every task is split into semantic
+chunks before being embedded (`internal/similar/chunks.go`):
+
+- The HTML sections (description, result) are parsed for structure: headings
+  (`# `), list items (`- `) and paragraphs become separate blocks; tiny
+  markers keep the structure readable for the embedding model.
+- Small blocks are merged greedily up to `EMBED_CHUNK_CHARS` (default 2000
+  runes); a single oversized block is cut at sentence boundaries, with
+  `EMBED_CHUNK_OVERLAP` runes of overlap for window-split sentences.
+- The task title is its own chunk, comments are grouped per chunk.
+- Each chunk is embedded separately and stored as its own Qdrant point
+  (point id = hash(task_id + chunk index); payload keeps `eva_id`,
+  `chunk_index`, `chunk_count`). Similarity search queries with every chunk
+  of the new task and aggregates the best score per candidate task.
+
+Set `EMBED_CHUNKING=none` to fall back to the legacy behaviour: one
+aggregated text (`EMBED_MAX_CHARS` cap), one vector, one point per task.
+Switching modes on an already-populated collection requires
+`INDEXER_RECREATE=true` because the point ids differ.
 
 ## Notes / TODOs
 
