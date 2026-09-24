@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"strings"
@@ -131,7 +132,11 @@ func handleWebhook(svc *similar.Service, cfg config.Config, log *slog.Logger, en
 
 func handleManualIndex(svc *similar.Service, log *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		id := r.PathValue("id")
+		id, err := url.PathUnescape(r.PathValue("id"))
+		if err != nil {
+			http.Error(w, "invalid task id in path: "+err.Error(), http.StatusBadRequest)
+			return
+		}
 		doc, err := svc.IndexTask(r.Context(), id)
 		if err != nil {
 			log.Error("manual index", "id", id, "err", err)
@@ -145,7 +150,11 @@ func handleManualIndex(svc *similar.Service, log *slog.Logger) http.HandlerFunc 
 
 func handleManualLink(svc *similar.Service, log *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		id := r.PathValue("id")
+		id, err := url.PathUnescape(r.PathValue("id"))
+		if err != nil {
+			http.Error(w, "invalid task id in path: "+err.Error(), http.StatusBadRequest)
+			return
+		}
 		doc, matches, err := svc.FindAndLink(r.Context(), id)
 		if err != nil {
 			log.Error("manual link", "id", id, "err", err)
