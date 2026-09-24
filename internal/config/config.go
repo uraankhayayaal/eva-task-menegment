@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/json"
 	"os"
 	"strconv"
 	"strings"
@@ -16,16 +17,22 @@ type Config struct {
 	EvaLogin           string
 	EvaPassword        string
 	EvaAuthLoginURL    string
-	TaskListMethod     string
-	TaskGetMethod      string
-	TaskCommentsMethod string
-	TaskLinkMethod     string
-	TaskIDField        string
-	TaskTitleField     string
-	TaskDescField      string
-	TaskResultField    string
-	TaskCommentField   string
-	TaskPayloadFields  []string
+	TaskListMethod          string
+	TaskGetMethod           string
+	TaskCommentsMethod      string
+	TaskLinkMethod          string
+	TaskIDField             string
+	TaskCodeField           string
+	TaskGetFilterField      string
+	TaskTitleField          string
+	TaskDescField           string
+	TaskResultField         string
+	TaskCommentField        string
+	TaskCommentParentField  string
+	TaskCommentParentPrefix string
+	TaskPayloadFields       []string
+	TaskListFilter          []any
+	LinkRelationType        string
 
 	// Embeddings
 	EmbedProvider string // ollama | tei
@@ -60,7 +67,7 @@ type Config struct {
 func Load() Config {
 	LoadEnvFile(".env")
 	cfg := Config{
-		EvaRPCURL:              get("EVA_RPC_URL", "http://localhost:8080/api"),
+		EvaRPCURL:              get("EVA_RPC_URL", "https://eva.staff.rfn.ru/api"),
 		EvaAuthHeader:          get("EVA_AUTH_HEADER", ""),
 		EvaLogin:               get("EVA_LOGIN", ""),
 		EvaPassword:            get("EVA_PASSWORD", ""),
@@ -68,14 +75,20 @@ func Load() Config {
 		EvaAPIToken:            get("EVA_API_TOKEN", ""),
 		TaskListMethod:         get("EVA_TASK_LIST_METHOD", "CmfTask.list"),
 		TaskGetMethod:          get("EVA_TASK_GET_METHOD", "CmfTask.get"),
-		TaskCommentsMethod:     get("EVA_TASK_COMMENTS_METHOD", "CmfTaskComment.list"),
-		TaskLinkMethod:         get("EVA_TASK_LINK_METHOD", "CmfTask.save_links"),
+		TaskCommentsMethod:     get("EVA_TASK_COMMENTS_METHOD", "CmfComment.list"),
+		TaskLinkMethod:         get("EVA_TASK_LINK_METHOD", "CmfRelationOption.create"),
 		TaskIDField:            get("EVA_TASK_ID_FIELD", "id"),
-		TaskTitleField:         get("EVA_TASK_TITLE_FIELD", "title"),
-		TaskDescField:          get("EVA_TASK_DESC_FIELD", "description"),
+		TaskCodeField:          get("EVA_TASK_CODE_FIELD", "code"),
+		TaskGetFilterField:     get("EVA_TASK_GET_FILTER_FIELD", "id"),
+		TaskTitleField:         get("EVA_TASK_TITLE_FIELD", "name"),
+		TaskDescField:          get("EVA_TASK_DESC_FIELD", "text"),
 		TaskResultField:        get("EVA_TASK_RESULT_FIELD", "result"),
 		TaskCommentField:       get("EVA_TASK_COMMENT_FIELD", "text"),
+		TaskCommentParentField: get("EVA_TASK_COMMENT_PARENT_FIELD", "parent"),
+		TaskCommentParentPrefix: get("EVA_TASK_COMMENT_PARENT_PREFIX", "CmfTask:"),
 		TaskPayloadFields:      split(get("EVA_TASK_PAYLOAD_FIELDS", "number,project_id,status")),
+		TaskListFilter:         jsonTriples(get("EVA_TASK_LIST_FILTER", "")),
+		LinkRelationType:       get("EVA_LINK_RELATION_TYPE", "related"),
 		EmbedProvider:          get("EMBED_PROVIDER", "ollama"),
 		OllamaURL:              strings.TrimRight(get("OLLAMA_URL", "http://localhost:11434"), "/"),
 		OllamaModel:            get("OLLAMA_MODEL", "nomic-embed-text"),
@@ -143,4 +156,17 @@ func split(s string) []string {
 		}
 	}
 	return out
+}
+
+// jsonTriples parses an optional EVA_TASK_LIST_FILTER into filter triples,
+// e.g. [["status","!=","closed"]].
+func jsonTriples(s string) []any {
+	if s == "" {
+		return nil
+	}
+	var triples []any
+	if err := json.Unmarshal([]byte(s), &triples); err != nil {
+		return nil
+	}
+	return triples
 }

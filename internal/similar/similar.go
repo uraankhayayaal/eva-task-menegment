@@ -17,6 +17,7 @@ import (
 // TaskDoc is the normalized task material used for embeddings.
 type TaskDoc struct {
 	ID          string
+	Code        string
 	Title       string
 	Description string
 	Result      string
@@ -28,6 +29,7 @@ type TaskDoc struct {
 // Match is one similar task found in Qdrant.
 type Match struct {
 	ID            string
+	Code          string
 	Score         float32
 	Title         string
 	AlreadyLinked bool
@@ -61,8 +63,9 @@ func (s *Service) IndexAll(ctx context.Context) error {
 		}
 	}
 	page := 0
-	for {
-		filter := map[string]any{}
+		for {
+			filter := " — "
+		filter := s.cfg.TaskListFilter
 		tasks, total, err := eva.ListTasks(ctx, s.eva, s.cfg.TaskListMethod, filter, page*s.cfg.IndexerPageSize, s.cfg.IndexerPageSize)
 		if err != nil {
 			return err
@@ -78,9 +81,6 @@ func (s *Service) IndexAll(ctx context.Context) error {
 			break
 		}
 		page++
-		if total > 0 && page*s.cfg.IndexerPageSize >= total {
-			break
-		}
 	}
 	return nil
 }
@@ -101,7 +101,7 @@ func (s *Service) IndexRaw(ctx context.Context, tasks []map[string]any) error {
 
 // IndexTask embeds a single task by its id and stores it in Qdrant.
 func (s *Service) IndexTask(ctx context.Context, id any) (*TaskDoc, error) {
-	raw, err := eva.GetTask(ctx, s.eva, s.cfg.TaskGetMethod, id)
+	raw, err := eva.GetTask(ctx, s.eva, s.cfg.TaskGetMethod, s.cfg.TaskGetFilterField, id)
 	if err != nil {
 		return nil, err
 	}
@@ -138,6 +138,9 @@ func (s *Service) embedAndStore(ctx context.Context, docs []*TaskDoc) error {
 			d.Vector = vectors[j]
 			d.Payload["eva_id"] = d.ID
 			d.Payload["title"] = d.Title
+			if d.Code != "" {
+				d.Payload["code"] = d.Code
+			}
 			if _, ok := d.Payload["links"]; !ok {
 				d.Payload["links"] = []string{}
 			}
@@ -176,6 +179,7 @@ func (s *Service) FindSimilar(ctx context.Context, doc *TaskDoc) ([]Match, error
 		}
 		matches = append(matches, Match{
 			ID:            id,
+			Code:          str(h.Payload["code"]),
 			Score:         h.Score,
 			Title:         str(h.Payload["title"]),
 			AlreadyLinked: already,
@@ -206,7 +210,7 @@ func (s *Service) FindAndLink(ctx context.Context, taskID any) (*TaskDoc, []Matc
 			continue
 		}
 		if !s.cfg.LinksDryRun {
-			if err := eva.LinkTasks(ctx, s.eva, s.cfg.TaskLinkMethod, doc.ID, m.ID, "similar"); err != nil {
+			if err := eva.LinkTasks(ctx, s.eva, s.cfg.TaskLinkMethod, relID(doc.Code, doc.ID), relID(m.Code, m.ID), s.cfg.LinkRelationType); err != nil {
 				s.log.Error("link failed", "from", doc.ID, "to", m.ID, "err", err)
 				continue
 			}
@@ -239,11 +243,12 @@ func (s *Service) normalize(ctx context.Context, raw map[string]any) (*TaskDoc, 
 	}
 	doc := &TaskDoc{
 		ID:          id,
+		Code:        strp(lookup(raw, s.cfg.TaskCodeField)),
 		Title:       strp(lookup(raw, s.cfg.TaskTitleField)),
 		Description: strp(lookup(raw, s.cfg.TaskDescField)),
 		Result:      strp(lookup(raw, s.cfg.TaskResultField)),
 	}
-	in, err := eva.ListComments(ctx, s.eva, s.cfg.TaskCommentsMethod, id, map[string]any{})
+	in, err := eva.ListComments(ctx, s.eva, s.cfg.TaskCommentsMethod, s.cfg.TaskCommentParentPrefix, id)
 	if err != nil {
 		s.log.Warn("fetch comments", "task", id, "err", err)
 	} else {
@@ -266,6 +271,15 @@ func (s *Service) normalize(ctx context.Context, raw map[string]any) (*TaskDoc, 
 
 func (s *Service) buildText(d *TaskDoc) string {
 	return textutil.Join(s.cfg.EmbedMaxChars, d.Title, d.Description, d.Result, strings.Join(d.Comments, "\n"))
+}
+
+// relID returns the identifier used as out_link/in_link in CmfRelationOption
+// — the task code when present, otherwise its id.
+func relID(code, id string) string {
+	if code != "" {
+		return code
+	}
+	return id
 }
 
 // lookup walks a dotted path inside a nested map.

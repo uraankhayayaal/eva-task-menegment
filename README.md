@@ -6,7 +6,7 @@ embedding server (Ollama or text-embeddings-inference), then links newly
 created tasks to their semantically closest existing tasks.
 
 ```
-Eva (JSON-RPC 2.0) ──► indexer ──► embeddings (Ollama/TEI) ──► Qdrant
+Eva (JSON-RPC 2.2) ──► indexer ──► embeddings (Ollama/TEI) ──► Qdrant
 Eva webhook ────────► listener ──► embed + vector search  ──► link tasks in Eva
 ```
 
@@ -53,47 +53,61 @@ curl http://localhost:8080/healthz
 ## How it works
 
 1. `indexer` pages through Eva tasks via
-   `POST <EVA_RPC_URL>?m=CmfTask.list`, fetches each task's comments, builds
-   the embedding text `title + description + result + comments`, embeds it in
-   batches and upserts the vector with metadata into the Qdrant collection
-   `eva_tasks` (point id = hash of the Eva task id, payload keeps `eva_id`).
+   `POST <EVA_RPC_URL>/?m=CmfTask.list` (kwargs: `filter`, `slice`, `order_by`),
+   fetches each task's comments via `CmfComment.list` (filter
+   `parent == CmfTask:<id>`), builds the embedding text
+   `name + text + result + comments`, embeds it in batches and upserts the
+   vector with metadata into the Qdrant collection `eva_tasks` (point id =
+   hash of the Eva task id, payload keeps `eva_id`/`code`).
 2. `listener` accepts `POST /webhook/task`. It extracts the task id from the
    payload (`LISTENER_TASK_ID_PATH`, dotted path, e.g. `task.id`), indexes the
    task, then runs a Qdrant cosine search for the closest tasks above
    `LISTENER_SCORE_THRESHOLD`. It links each result in Eva via
-   `EVA_TASK_LINK_METHOD` (default `CmfTask.save_links`; override if your
-   instance differs) and records the link in the point payload to avoid
-   duplicates. With `LINKS_DRY_RUN=true` (default) it only logs.
+   `CmfRelationOption.create` with kwargs
+   `{out_link, in_link, relation_type}` and records the link in the point
+   payload to avoid duplicates. With `LINKS_DRY_RUN=true` (default) it only
+   logs.
 
 ## Eva API wiring
 
-The client speaks the JSON-RPC 2.0 dialect used by Eva's web app:
-`POST <api_url>?m=<Model>.<method>` with a body carrying
-`model`/`method`/`args`/`kwargs`/`filter`. Everything instance-specific is
-config:
+The client speaks the JSON-RPC 2.2 dialect from the official OpenAPI spec
+`oas_evateam_v1_9_22.json`: `POST {EVA_RPC_URL}/?m=<Model>.<method>` with a
+body of `{"jsonrpc":"2.2","method":...,"callid":"<uuid>","kwargs":{...}}`.
+`kwargs` carries `filter` (array of `[field, op, value]` triples),
+`fields`, `slice` (`[offset, limit]`), `order_by` and `include_archived`.
+Everything instance-specific is config:
 
 | Variable | Default | Notes |
 |---|---|---|
-| `EVA_RPC_URL` | `http://localhost:8080/api` | Full endpoint of your Eva instance |
+| `EVA_RPC_URL` | `https://eva.staff.rfn.ru/api` | Base endpoint; client appends `/?m=...` |
 | `EVA_API_TOKEN` | — | **Recommended.** Sent as `Authorization: Bearer <token>` |
+| `EVA_APITOKEN_HEADER` / `_SCHEME` | `Authorization` / `Bearer` | Header/scheme for the token |
 | `EVA_AUTH_HEADER` | — | Custom static `Name: Value` header; lower priority than API token |
-| `EVA_LOGIN` / `EVA_PASSWORD` | — | Password login via `EVA_AUTH_LOGIN_URL`; only used when no token is set |
-| `EVA_TASK_LIST_METHOD` | `CmfTask.list` | Positional args `[filter, offset, limit]` |
-| `EVA_TASK_GET_METHOD` | `CmfTask.get` | Arg: task id |
-| `EVA_TASK_COMMENTS_METHOD` | `CmfTaskComment.list` | Args `[task_id, filter]` |
-| `EVA_TASK_LINK_METHOD` | `CmfTask.save_links` | Called with `[[{from,to,type}]]` — override to match your API |
-| `EVA_TASK_ID_FIELD` | `id` | Dotted path of the id in the task object |
-| `EVA_TASK_TITLE_FIELD` / `_DESC_FIELD` / `_RESULT_FIELD` | `title` / `description` / `result` | Dotted paths of the text fields |
-| `EVA_TASK_COMMENT_FIELD` | `text` | Comment text field |
+| `EVA_LOGIN` / `EVA_PASSWORD` | — | SSO login via `EVA_AUTH_LOGIN_URL` (`/auth/signin`); only used when no token is set |
+| `EVA_TASK_LIST_METHOD` | `CmfTask.list` | kwargs `{filter, slice, include_archived}` |
+| `EVA_TASK_LIST_FILTER` | — | JSON filter triples applied to every page, e.g. `[["status","!=","closed"]]` |
+| `EVA_TASK_GET_METHOD` | `CmfTask.get` | kwargs `{filter: [[EVA_TASK_GET_FILTER_FIELD,"==",id]]}` |
+| `EVA_TASK_COMMENTS_METHOD` | `CmfComment.list` | kwargs `{filter: [[parent,"==",CmfTask:<id>]]}` |
+| `EVA_TASK_LINK_METHOD` | `CmfRelationOption.create` | kwargs `{out_link, in_link, relation_type}` |
+| `EVA_LINK_RELATION_TYPE` | `related` | Relation type (instance-specific: `blocks`, `parent`, ...) |
+| `EVA_TASK_ID_FIELD` / `_CODE_FIELD` | `id` / `code` | Task uuid / short code; code is used as `out_link`/`in_link` |
+| `EVA_TASK_TITLE_FIELD` / `_DESC_FIELD` / `_RESULT_FIELD` | `name` / `text` / `result` | Dotted paths of the text fields (Eva: `name`=заголовок, `text`=HTML-описание) |
+| `EVA_TASK_COMMENT_FIELD` / `_PARENT_PREFIX` | `text` / `CmfTask:` | Comment text field and task reference prefix |
 | `EVA_TASK_PAYLOAD_FIELDS` | `number,project_id,status` | Extra fields copied into the vector payload |
 
 The exact model/method names and field layout depend on your Eva version; the
 parameters above let you adapt without code changes. If the RPC `result` is
-wrapped (`{"result": {...}}`) or returned as a bare list, the client handles
-both.
+wrapped or returned as a bare list, the client handles both.
 
 **Auth priority:** `EVA_API_TOKEN` (Bearer) → `EVA_AUTH_HEADER` → login/password.
 The startup log prints `auth=` so you can verify which scheme was picked.
+
+> **rfn SSO:** `eva.staff.rfn.ru` sits behind a custom «Авторизация» proxy that
+> 302-redirects every call to `/auth/signin` — the API token may not pass
+> through it. To work around, either whitelist `/api/` for the Bearer token on
+> the proxy, or set `EVA_LOGIN`/`EVA_PASSWORD`/`EVA_AUTH_LOGIN_URL` so the
+> client POSTs the SSO form (plaintext password is the SSO's documented mode
+> for external systems) and reuses the session cookie.
 
 **Webhook auth:** set `WEBHOOK_TOKEN` and Eva must send it as
 `Authorization: Bearer <token>` (or `X-Webhook-Token` / `?token=`). The
@@ -109,12 +123,11 @@ otherwise.
 
 ## Notes / TODOs
 
-- The webhook payload schema and the "link tasks" RPC method are the two
-  unknowns that depend on your Eva instance — see `internal/eva/task.go`
-  (`LinkTasks`) and `.env.example` for the knobs.
-- `LISTENER_PATH`/score tuning: start `LISTENER_SCORE_THRESHOLD=0.75` with
-  `LINKS_DRY_RUN=true`, inspect the logs, then lower/raise and flip dry-run
-  when satisfied.
+- The webhook payload schema and the SSO/token auth interplay are the two
+  instance-specific unknowns — see `internal/eva/client.go` (`Auth`) and
+  `.env.example` for the knobs.
+- `LISTENER_SCORE_THRESHOLD` tuning: start `0.75` with `LINKS_DRY_RUN=true`,
+  inspect the logs, then lower/raise and flip dry-run when satisfied.
 
 ## Спек EVA API
 https://redocly.github.io/redoc/?url=https://docs.evateam.ru/files/obj/CmfDocument/CmfDocument%3Ad22/CmfDocument%3Ad22c35d4-581b-11f0-bfd0-00161e12a413/oas_evateam_v1_9_22.json

@@ -62,13 +62,14 @@ func (c *Client) DropCollection(ctx context.Context, name string) error {
 	return c.do(ctx, http.MethodDelete, "/collections/"+name, nil, nil)
 }
 
-// Upsert writes points to the collection (waits for indexing).
+// Upsert writes points to the collection (waits for indexing). The REST
+// upsert endpoint is PUT /collections/{name}/points with {"points": [...]}.
 func (c *Client) Upsert(ctx context.Context, name string, points []Point) error {
 	if len(points) == 0 {
 		return nil
 	}
 	body := map[string]any{"points": points}
-	return c.do(ctx, http.MethodPost, "/collections/"+name+"/points?wait=true", body, nil)
+	return c.do(ctx, http.MethodPut, "/collections/"+name+"/points?wait=true", body, nil)
 }
 
 // Search returns the top-n most similar points above the given score

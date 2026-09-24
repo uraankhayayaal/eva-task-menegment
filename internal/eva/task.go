@@ -8,49 +8,58 @@ import (
 
 // ListResult is the expected shape of a list call result. Depending on the
 // Eva endpoint the list may come back as a bare array or as an object with
-// "items"/"rows". We accept both and return []any.
+// "items"/"rows". We accept both and return []map[string]any.
 type ListResult struct {
 	Total int               `json:"total,omitempty"`
 	Items []any             `json:"items,omitempty"`
 	Rows  []any             `json:"rows,omitempty"`
 	Data  []any             `json:"data,omitempty"`
 	List  []any             `json:"list,omitempty"`
-	Raw   []json.RawMessage `json:"-"`
 }
 
-// ListTasks fetches one page of tasks (offset/limit) and returns the raw
-// items. Exactly which args the list endpoint expects is instance-dependent;
-// defaults use [filter, offset, limit] positional args.
-func ListTasks(ctx context.Context, c *Client, method string, filter map[string]any, offset, limit int) ([]map[string]any, int, error) {
-	args := []any{filter, offset, limit}
-	raw, err := c.Call(ctx, modelOf(method), methodOf(method), args, map[string]any{"offset": offset, "limit": limit})
+// ListTasks fetches one page of tasks via CmfTask.list. kwargs:
+//
+//	{filter: [[f,op,v],...], slice: [offset, limit], include_archived: false}
+func ListTasks(ctx context.Context, c *Client, method string, filterTriples []any, offset, limit int) ([]map[string]any, int, error) {
+	kwargs := map[string]any{
+		"slice":            []any{offset, limit},
+		"include_archived": false,
+	}
+	if len(filterTriples) > 0 {
+		kwargs["filter"] = filterTriples
+	}
+	raw, err := c.Call(ctx, method, kwargs)
 	if err != nil {
 		return nil, 0, err
 	}
 	return decodeItems(raw)
 }
 
-// GetTask fetches a single task by its id.
-func GetTask(ctx context.Context, c *Client, method string, id any) (map[string]any, error) {
-	raw, err := c.Call(ctx, modelOf(method), methodOf(method), []any{id}, nil)
+// GetTask fetches a single task via CmfTask.get with
+// filter = [[filterField, "==", id]].
+func GetTask(ctx context.Context, c *Client, method, filterField string, id any) (map[string]any, error) {
+	kwargs := map[string]any{
+		"filter": []any{[]any{filterField, "==", id}},
+	}
+	raw, err := c.Call(ctx, method, kwargs)
 	if err != nil {
 		return nil, err
 	}
-	var m map[string]any
-	if err := json.Unmarshal(raw, &m); err != nil {
+	items, n, err := decodeItems(raw)
+	if err != nil {
 		return nil, err
 	}
-	return m, nil
+	if n == 0 || items == nil {
+		return nil, fmt.Errorf("task %v not found", id)
+	}
+	return items[0], nil
 }
 
-// ListComments returns the comments of a task. The positional convention is
-// [task_id, filter]; override via config if your instance differs.
-func ListComments(ctx context.Context, c *Client, method string, taskID any, filter map[string]any) ([]map[string]any, error) {
-	args := []any{taskID}
-	if filter != nil {
-		args = append(args, filter)
-	}
-	raw, err := c.Call(ctx, modelOf(method), methodOf(method), args, map[string]any{"filter": filter})
+// ListComments returns the comments of a task via CmfComment.list with
+// filter = [[parent, "==", commentParentPrefix+id]].
+func ListComments(ctx context.Context, c *Client, method, commentParentPrefix string, taskID any) ([]map[string]any, error) {
+	filter := []any{[]any{"parent", "==", commentParentPrefix + fmt.Sprint(taskID)}}
+	raw, err := c.Call(ctx, method, map[string]any{"filter": filter})
 	if err != nil {
 		return nil, err
 	}
@@ -61,41 +70,22 @@ func ListComments(ctx context.Context, c *Client, method string, taskID any, fil
 	return items, nil
 }
 
-// LinkTasks requests Eva to create a link between two tasks. The exact
-// payload depends on your instance; by default it calls
-// <model>.save_links with [{from,to,type}]. Override EVA_TASK_LINK_METHOD
-// / link args if required.
+// LinkTasks asks Eva to create a relation between two tasks via
+// CmfRelationOption.create with kwargs {out_link, in_link, relation_type}.
 func LinkTasks(ctx context.Context, c *Client, method string, from, to any, linkType string) error {
-	model := modelOf(method)
-	args := []any{[]any{map[string]any{
-		"from": from,
-		"to":   to,
-		"type": linkType,
-	}}}
-	_, err := c.Call(ctx, model, methodOf(method), args, nil)
-	return err
-}
-
-func modelOf(full string) string {
-	for i := 0; i < len(full); i++ {
-		if full[i] == '.' {
-			return full[:i]
-		}
+	kwargs := map[string]any{
+		"out_link":      fmt.Sprint(from),
+		"in_link":       fmt.Sprint(to),
+		"relation_type": linkType,
 	}
-	return full
-}
-
-func methodOf(full string) string {
-	for i := 0; i < len(full); i++ {
-		if full[i] == '.' {
-			return full[i+1:]
-		}
+	if _, err := c.Call(ctx, method, kwargs); err != nil {
+		return err
 	}
-	return ""
+	return nil
 }
 
 func decodeItems(raw json.RawMessage) ([]map[string]any, int, error) {
-	// Strip a leading {"result": ...} wrapper if present.
+	// Pluck "result" from {"result": ...} wrappers.
 	if len(raw) > 0 && raw[0] == '{' {
 		var wrap struct {
 			Result json.RawMessage `json:"result"`
@@ -112,6 +102,11 @@ func decodeItems(raw json.RawMessage) ([]map[string]any, int, error) {
 	}
 	var lr ListResult
 	if err := json.Unmarshal(raw, &lr); err != nil {
+		// Some get responses return a bare object — wrap it.
+		var single map[string]any
+		if err2 := json.Unmarshal(raw, &single); err2 == nil {
+			return []map[string]any{single}, 1, nil
+		}
 		return nil, 0, fmt.Errorf("decode list result: %w", err)
 	}
 	items := lr.Items
