@@ -1,0 +1,16 @@
+# Binaries
+/bin/
+cmd/indexer/indexer
+cmd/listener/listener
+*.exe
+
+# Env
+.env
+
+# Go
+*.test
+*.out
+coverage.*
+
+# Misc
+.DS_Store

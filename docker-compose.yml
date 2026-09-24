@@ -1,0 +1,18 @@
+services:
+  qdrant:
+    image: qdrant/qdrant:v1.12.4
+    container_name: eva-qdrant
+    ports:
+      - "46333:6333"   # REST
+      - "46334:6334"   # gRPC
+    volumes:
+      - qdrant_data:/qdrant/storage
+    networks:
+      - eva-net
+
+volumes:
+  qdrant_data:
+
+networks:
+  eva-net:
+    driver: bridge
