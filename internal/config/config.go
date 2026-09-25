@@ -17,10 +17,11 @@ type Config struct {
 	EvaLogin                string
 	EvaPassword             string
 	EvaAuthLoginURL         string
-	TaskListMethod          string
-	TaskGetMethod           string
-	TaskCommentsMethod      string
-	TaskLinkMethod          string
+	TaskListMethod           string
+	TaskGetMethod            string
+	TaskCommentsMethod       string
+	TaskCommentCreateMethod  string
+	TaskLinkMethod           string
 	TaskIDField             string
 	TaskCodeField           string
 	TaskGetFilterField      string
@@ -69,7 +70,8 @@ type Config struct {
 	// Linker (polling alternative to the webhook: no inbound connectivity)
 	LinkerPollInterval     int // seconds
 	LinkerWatermarkFile    string
-	LinkerInitialLookback  int // hours, used until the first watermark is persisted
+	LinkerInitialLookback  int    // hours, used until the first watermark is persisted
+	LinkerLinkMode         string // "comment" (default) | "link"
 
 	LogLevel string
 }
@@ -86,6 +88,7 @@ func Load() Config {
 		TaskListMethod:          get("EVA_TASK_LIST_METHOD", "CmfTask.list"),
 		TaskGetMethod:           get("EVA_TASK_GET_METHOD", "CmfTask.get"),
 		TaskCommentsMethod:      get("EVA_TASK_COMMENTS_METHOD", "CmfComment.list"),
+		TaskCommentCreateMethod: get("EVA_TASK_COMMENT_CREATE_METHOD", "CmfComment.create"),
 		TaskLinkMethod:          get("EVA_TASK_LINK_METHOD", "CmfRelationOption.create"),
 		TaskIDField:             get("EVA_TASK_ID_FIELD", "id"),
 		TaskCodeField:           get("EVA_TASK_CODE_FIELD", "code"),
@@ -126,6 +129,7 @@ func Load() Config {
 		LinkerPollInterval:      getInt("LINKER_POLL_INTERVAL_SECONDS", 60),
 		LinkerWatermarkFile:     get("LINKER_WATERMARK_FILE", ""),
 		LinkerInitialLookback:   getInt("LINKER_INITIAL_LOOKBACK_HOURS", 24),
+		LinkerLinkMode:          get("LINKER_LINK_MODE", "comment"),
 		LogLevel:                get("LOG_LEVEL", "info"),
 	}
 	return cfg

@@ -60,6 +60,7 @@ func main() {
 		"watermark", watermark.Format(time.RFC3339),
 		"interval", interval,
 		"dry_run", cfg.LinksDryRun,
+		"link_mode", cfg.LinkerLinkMode,
 		"auth", eva.AuthMode(cfg),
 	)
 

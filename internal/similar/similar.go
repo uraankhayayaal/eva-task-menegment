@@ -494,9 +494,9 @@ func (s *Service) FindSimilar(ctx context.Context, doc *TaskDoc) ([]Match, error
 	return matches, nil
 }
 
-// FindAndLink is the listener entrypoint: index the new task, query the
-// closest existing tasks and link them in Eva.
-func (s *Service) FindAndLink(ctx context.Context, taskID any) (*TaskDoc, []Match, error) {
+// IndexAndFind indexes a task (embedding + Qdrant upsert) and returns its
+// closest matches without creating any relations.
+func (s *Service) IndexAndFind(ctx context.Context, taskID any) (*TaskDoc, []Match, error) {
 	doc, err := s.IndexTask(ctx, taskID)
 	if err != nil {
 		return nil, nil, err
@@ -504,6 +504,16 @@ func (s *Service) FindAndLink(ctx context.Context, taskID any) (*TaskDoc, []Matc
 	matches, err := s.FindSimilar(ctx, doc)
 	if err != nil {
 		return doc, nil, err
+	}
+	return doc, matches, nil
+}
+
+// FindAndLink is the listener entrypoint: index the new task, query the
+// closest existing tasks and link them in Eva.
+func (s *Service) FindAndLink(ctx context.Context, taskID any) (*TaskDoc, []Match, error) {
+	doc, matches, err := s.IndexAndFind(ctx, taskID)
+	if err != nil {
+		return doc, matches, err
 	}
 	if len(matches) == 0 {
 		return doc, nil, nil

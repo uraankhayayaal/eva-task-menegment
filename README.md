@@ -57,10 +57,15 @@ No webhook? Use the poller instead (outbound-only, works behind NAT/VPN):
 LINKER_WATERMARK_FILE=watermark.json go run ./cmd/linker
 ```
 It scans `CmfTask.list` every `LINKER_POLL_INTERVAL_SECONDS` for tasks created
-after the persisted watermark and runs find-and-link on each — same logic as
-the webhook path, minus the inbound endpoint. The first run starts from
+after the persisted watermark and processes each — same matching logic as the
+webhook path, minus the inbound endpoint. The first run starts from
 `LINKER_INITIAL_LOOKBACK_HOURS` and saves a watermark so restarts only reprocess
 genuinely new tasks.
+
+By default the linker does **not** create Eva relations: it posts an
+«Автолинкер» comment on the task listing its similar tasks (`LINKER_LINK_MODE=comment`).
+To restore relation creation in the linker set `LINKER_LINK_MODE=link`; the
+listener's `/link` and `/webhook/task` always create relations regardless.
 
 Deduplication (remove duplicate points — same `eva_id` + `chunk_index`):
 ```bash
@@ -111,6 +116,7 @@ Everything instance-specific is config:
 | `EVA_TASK_LIST_FILTER` | — | JSON filter triples applied to every page, e.g. `[["status","!=","closed"]]` |
 | `EVA_TASK_GET_METHOD` | `CmfTask.get` | kwargs `{filter: [[EVA_TASK_GET_FILTER_FIELD,"==",id]]}` |
 | `EVA_TASK_COMMENTS_METHOD` | `CmfComment.list` | kwargs `{filter: [[parent,"==",CmfTask:<id>]]}` |
+| `EVA_TASK_COMMENT_CREATE_METHOD` | `CmfComment.create` | kwargs `{parent, text}`; posts the «Автолинкер» comment in `LINKER_LINK_MODE=comment` |
 | `EVA_TASK_LINK_METHOD` | `CmfRelationOption.create` | kwargs `{out_link, in_link, relation_type}` |
 | `EVA_LINK_RELATION_TYPE` | — | Full id from `CmfRelationType.list`, e.g. `CmfRelationType:...` (system.link = «Взаимная»). Plain codes like `related` are rejected |
 | `EVA_TASK_ID_FIELD` / `_CODE_FIELD` | `id` / `code` | Task uuid / short code; code is used as `out_link`/`in_link` |

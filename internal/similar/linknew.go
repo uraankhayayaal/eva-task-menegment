@@ -3,14 +3,22 @@ package similar
 import (
 	"context"
 	"fmt"
+	"html"
+	"strings"
 	"time"
 
 	"evasimilar/internal/eva"
 )
 
-// LinkNewTasks polls Eva for tasks created after watermark and runs
-// find-and-link on every one of them. It returns the newest cmf_created_at
-// seen so the caller can persist it as the new watermark.
+// linkCommentMarker prefixes every comment posted by the linker, so repeated
+// runs (e.g. a missing watermark) can detect the task was already commented.
+const linkCommentMarker = "Автолинкер:"
+
+// LinkNewTasks polls Eva for tasks created after watermark and processes every
+// one of them. Depending on LINKER_LINK_MODE it either creates relations
+// ("link") or posts a comment listing the similar tasks ("comment", default).
+// It returns the newest cmf_created_at seen so the caller can persist it as
+// the new watermark.
 //
 // The watermark advances past tasks that failed to process (they are logged
 // and can be retried manually via /link/<id>), so a task that always fails
@@ -52,14 +60,14 @@ func (s *Service) LinkNewTasks(ctx context.Context, watermark time.Time) (time.T
 					newest = ts
 				}
 			}
-			_, matches, err := s.FindAndLink(ctx, id)
+			err := s.processNewTask(ctx, id)
 			if err != nil {
 				failed++
-				s.log.Error("link new task", "id", id, "err", err)
+				s.log.Error("link new task", "id", id, "mode", s.cfg.LinkerLinkMode, "err", err)
 				continue
 			}
 			processed++
-			s.log.Info("linked new task", "id", id, "matches", len(matches), "dry_run", s.cfg.LinksDryRun)
+			s.log.Info("processed new task", "id", id, "mode", s.cfg.LinkerLinkMode)
 		}
 		offset += len(tasks)
 		if len(tasks) < pageSize {
@@ -73,6 +81,92 @@ func (s *Service) LinkNewTasks(ctx context.Context, watermark time.Time) (time.T
 		"newest", newest.Format(time.RFC3339),
 	)
 	return newest, nil
+}
+
+// processNewTask handles a single newly created task according to the
+// configured LINKER_LINK_MODE.
+func (s *Service) processNewTask(ctx context.Context, id string) error {
+	switch s.cfg.LinkerLinkMode {
+	case "link":
+		return s.linkNewTask(ctx, id)
+	default:
+		return s.commentNewTask(ctx, id)
+	}
+}
+
+// linkNewTask indexes the task and creates Eva relations to similar tasks
+// (kept as the fallback "LINKER_LINK_MODE=link" behaviour).
+func (s *Service) linkNewTask(ctx context.Context, id string) error {
+	_, matches, err := s.FindAndLink(ctx, id)
+	if err != nil {
+		return err
+	}
+	s.log.Info("linked new task", "id", id, "matches", len(matches), "dry_run", s.cfg.LinksDryRun)
+	return nil
+}
+
+// commentNewTask indexes the task, finds similar tasks and posts a comment on
+// the task itself listing them, without creating any Eva relations.
+func (s *Service) commentNewTask(ctx context.Context, id string) error {
+	doc, matches, err := s.IndexAndFind(ctx, id)
+	if err != nil {
+		return err
+	}
+	s.log.Info("found candidates", "id", id, "matches", len(matches))
+	if len(matches) == 0 {
+		return nil
+	}
+	return s.linkByComment(ctx, doc, matches)
+}
+
+// linkByComment writes a comment listing the matches, skipping the write when
+// the linker has already commented on the task or when LINKS_DRY_RUN is set.
+func (s *Service) linkByComment(ctx context.Context, doc *TaskDoc, matches []Match) error {
+	parent := doc.ID
+	if s.cfg.TaskCommentParentPrefix != "" && !strings.HasPrefix(parent, s.cfg.TaskCommentParentPrefix) {
+		parent = s.cfg.TaskCommentParentPrefix + parent
+	}
+	comments, err := eva.ListComments(ctx, s.eva, s.cfg.TaskCommentsMethod, "", s.cfg.TaskCommentsFields, parent)
+	if err != nil {
+		return err
+	}
+	for _, c := range comments {
+		if text := strp(lookup(c, s.cfg.TaskCommentField)); strings.Contains(text, linkCommentMarker) {
+			s.log.Info("already commented", "id", doc.ID)
+			return nil
+		}
+	}
+	text := CommentText(matches)
+	if s.cfg.LinksDryRun {
+		s.log.Info("dry run: would comment", "id", doc.ID, "parent", parent, "text", text)
+		return nil
+	}
+	if err := eva.CreateComment(ctx, s.eva, s.cfg.TaskCommentCreateMethod, parent, text); err != nil {
+		return err
+	}
+	s.log.Info("commented", "id", doc.ID, "matches", len(matches))
+	return nil
+}
+
+// CommentText renders the HTML comment body the linker posts on a task,
+// listing its similar tasks. Starts with linkCommentMarker so repeated runs
+// are idempotent.
+func CommentText(matches []Match) string {
+	var b strings.Builder
+	b.WriteString("<p><b>" + linkCommentMarker + "</b> задача связана с похожими задачами:</p><ul>")
+	for _, m := range matches {
+		label := m.Code
+		if label == "" {
+			label = m.ID
+		}
+		b.WriteString("<li>")
+		b.WriteString(html.EscapeString(label))
+		b.WriteString(" &mdash; ")
+		b.WriteString(html.EscapeString(m.Title))
+		b.WriteString(fmt.Sprintf(" (%.4f)</li>", m.Score))
+	}
+	b.WriteString("</ul>")
+	return b.String()
 }
 
 func addField(fields []string, f string) []string {

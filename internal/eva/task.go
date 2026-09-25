@@ -109,6 +109,20 @@ func ListComments(ctx context.Context, c *Client, method, commentParentPrefix st
 	return items, nil
 }
 
+// CreateComment posts a comment to a task via CmfComment.create with kwargs
+// {parent, text}. parent must be the full task reference ("CmfTask:<uuid>");
+// text is HTML.
+func CreateComment(ctx context.Context, c *Client, method, parent, text string) error {
+	kwargs := map[string]any{
+		"parent": parent,
+		"text":   text,
+	}
+	if _, err := c.Call(ctx, method, kwargs); err != nil {
+		return err
+	}
+	return nil
+}
+
 // LinkTasks asks Eva to create a relation between two tasks via
 // CmfRelationOption.create with kwargs {out_link, in_link, relation_type}.
 func LinkTasks(ctx context.Context, c *Client, method string, from, to any, linkType string) error {
