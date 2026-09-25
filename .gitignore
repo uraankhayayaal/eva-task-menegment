@@ -7,6 +7,9 @@ cmd/listener/listener
 # Env
 .env
 
+# Runtime state
+watermark.json
+
 # Go
 *.test
 *.out
