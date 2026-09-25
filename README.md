@@ -47,8 +47,9 @@ go run ./cmd/listener
 
 Manual triggers (useful while wiring webhooks):
 ```bash
-curl http://localhost:8480/index/<task_id>   # index a single task
-curl http://localhost:8480/link/<task_id>    # index + find + link similar
+curl http://localhost:8480/index/<task_id>     # index a single task
+curl http://localhost:8480/link/<task_id>      # index + find + link similar (relations)
+curl http://localhost:8480/comment/<task_id>   # index + find + post «Автолинкер» comment (no relations)
 curl http://localhost:8480/healthz
 ```
 

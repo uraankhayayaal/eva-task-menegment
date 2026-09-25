@@ -67,6 +67,7 @@ func main() {
 	}
 	mux.HandleFunc("GET /index/{id}", manual(handleManualIndex(svc, log)))
 	mux.HandleFunc("GET /link/{id}", manual(handleManualLink(svc, log)))
+	mux.HandleFunc("GET /comment/{id}", manual(handleManualComment(svc, log)))
 
 	srv := &http.Server{Addr: cfg.ListenerAddr, Handler: mux}
 	go func() {
@@ -163,6 +164,24 @@ func handleManualLink(svc *similar.Service, log *slog.Logger) http.HandlerFunc {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{"task_id": doc.ID, "linked": matches})
+	}
+}
+
+func handleManualComment(svc *similar.Service, log *slog.Logger) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id, err := url.PathUnescape(r.PathValue("id"))
+		if err != nil {
+			http.Error(w, "invalid task id in path: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		doc, matches, err := svc.CommentTask(r.Context(), id)
+		if err != nil {
+			log.Error("manual comment", "id", id, "err", err)
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"task_id": doc.ID, "commented": matches})
 	}
 }
 
