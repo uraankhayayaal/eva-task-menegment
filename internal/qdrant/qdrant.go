@@ -35,6 +35,11 @@ type ScoredPoint struct {
 	Payload map[string]any `json:"payload,omitempty"`
 }
 
+type ScrolledPoint struct {
+	ID      uint64         `json:"id"`
+	Payload map[string]any `json:"payload"`
+}
+
 type apiResponse struct {
 	Status string          `json:"status"`
 	Result json.RawMessage `json:"result"`
@@ -45,11 +50,24 @@ type apiResponse struct {
 // the collection once, which lets the indexer filter an Eva page without one
 // Qdrant request per task.
 func (c *Client) ExistingTaskIDs(ctx context.Context, name string) (map[string]struct{}, error) {
-	type scrollPoint struct {
-		Payload map[string]any `json:"payload"`
+	points, err := c.Scroll(ctx, name, []string{"eva_id"})
+	if err != nil {
+		return nil, err
 	}
+	ids := make(map[string]struct{}, len(points))
+	for _, point := range points {
+		if id := fmt.Sprint(point.Payload["eva_id"]); id != "" && id != "<nil>" {
+			ids[id] = struct{}{}
+		}
+	}
+	return ids, nil
+}
+
+// Scroll walks the whole collection and returns every point's id together with
+// the requested payload fields (withVector is always false).
+func (c *Client) Scroll(ctx context.Context, name string, payloadFields []string) ([]ScrolledPoint, error) {
 	type scrollResult struct {
-		Points         []scrollPoint   `json:"points"`
+		Points         []ScrolledPoint `json:"points"`
 		NextPageOffset json.RawMessage `json:"next_page_offset"`
 	}
 	type scrollResponse struct {
@@ -57,12 +75,12 @@ func (c *Client) ExistingTaskIDs(ctx context.Context, name string) (map[string]s
 		Error  string       `json:"error"`
 	}
 
-	ids := make(map[string]struct{})
+	var out []ScrolledPoint
 	var offset json.RawMessage
 	for {
 		body := map[string]any{
 			"limit":        1000,
-			"with_payload": []string{"eva_id"},
+			"with_payload": payloadFields,
 			"with_vector":  false,
 		}
 		if len(offset) > 0 && string(offset) != "null" {
@@ -83,17 +101,40 @@ func (c *Client) ExistingTaskIDs(ctx context.Context, name string) (map[string]s
 		if resp.Error != "" {
 			return nil, fmt.Errorf("qdrant scroll: %s", resp.Error)
 		}
-		for _, point := range resp.Result.Points {
-			if id := fmt.Sprint(point.Payload["eva_id"]); id != "" && id != "<nil>" {
-				ids[id] = struct{}{}
-			}
-		}
+		out = append(out, resp.Result.Points...)
 		if len(resp.Result.NextPageOffset) == 0 || string(resp.Result.NextPageOffset) == "null" {
 			break
 		}
 		offset = resp.Result.NextPageOffset
 	}
-	return ids, nil
+	return out, nil
+}
+
+// ListCollections returns the names of all collections in this Qdrant.
+func (c *Client) ListCollections(ctx context.Context) ([]string, error) {
+	raw, err := c.doRaw(ctx, http.MethodGet, "/collections", nil)
+	if err != nil {
+		return nil, err
+	}
+	var resp struct {
+		Result struct {
+			Collections []struct {
+				Name string `json:"name"`
+			} `json:"collections"`
+		} `json:"result"`
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return nil, err
+	}
+	if resp.Error != "" {
+		return nil, fmt.Errorf("qdrant list collections: %s", resp.Error)
+	}
+	out := make([]string, 0, len(resp.Result.Collections))
+	for _, c := range resp.Result.Collections {
+		out = append(out, c.Name)
+	}
+	return out, nil
 }
 
 // CountPoints returns the exact number of points stored in a collection.
@@ -192,6 +233,15 @@ func (c *Client) Search(ctx context.Context, name string, vector []float32, limi
 // Delete removes points matching a filter (filter is a Qdrant filter JSON).
 func (c *Client) Delete(ctx context.Context, name string, filter map[string]any) error {
 	body := map[string]any{"filter": filter, "wait": true}
+	return c.do(ctx, http.MethodPost, "/collections/"+name+"/points/delete", body, nil)
+}
+
+// DeleteByIDs removes points by their numeric ids (waits for indexing).
+func (c *Client) DeleteByIDs(ctx context.Context, name string, ids []uint64) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	body := map[string]any{"points": ids, "wait": true}
 	return c.do(ctx, http.MethodPost, "/collections/"+name+"/points/delete", body, nil)
 }
 
