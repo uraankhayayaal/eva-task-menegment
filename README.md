@@ -16,6 +16,8 @@ Eva webhook ────────► listener ──► embed + vector search
 |-----------------|---------------------------------------------------------------------|
 | `cmd/indexer`   | Continuously reads new tasks (+ comments) from Eva and upserts them |
 | `cmd/listener`  | HTTP webhook server: on a new task, finds similar ones and links them |
+| `cmd/linker`    | Polling listener (no webhook/NAT needed): scans new tasks, finds + links |
+| `cmd/dedup`     | One-shot: finds and (optionally) deletes duplicate points in Qdrant |
 
 ## Prerequisites
 
@@ -48,6 +50,24 @@ Manual triggers (useful while wiring webhooks):
 curl http://localhost:8480/index/<task_id>   # index a single task
 curl http://localhost:8480/link/<task_id>    # index + find + link similar
 curl http://localhost:8480/healthz
+```
+
+No webhook? Use the poller instead (outbound-only, works behind NAT/VPN):
+```bash
+LINKER_WATERMARK_FILE=watermark.json go run ./cmd/linker
+```
+It scans `CmfTask.list` every `LINKER_POLL_INTERVAL_SECONDS` for tasks created
+after the persisted watermark and runs find-and-link on each — same logic as
+the webhook path, minus the inbound endpoint. The first run starts from
+`LINKER_INITIAL_LOOKBACK_HOURS` and saves a watermark so restarts only reprocess
+genuinely new tasks.
+
+Deduplication (remove duplicate points — same `eva_id` + `chunk_index`):
+```bash
+go run ./cmd/dedup                      # dry run, scans every Qdrant collection
+go run ./cmd/dedup -collections eva_tasks
+go run ./cmd/dedup -collections a,b      # a single collection or a comma-separated list
+go run ./cmd/dedup -apply                # actually delete the duplicates
 ```
 
 ## How it works
@@ -92,7 +112,7 @@ Everything instance-specific is config:
 | `EVA_TASK_GET_METHOD` | `CmfTask.get` | kwargs `{filter: [[EVA_TASK_GET_FILTER_FIELD,"==",id]]}` |
 | `EVA_TASK_COMMENTS_METHOD` | `CmfComment.list` | kwargs `{filter: [[parent,"==",CmfTask:<id>]]}` |
 | `EVA_TASK_LINK_METHOD` | `CmfRelationOption.create` | kwargs `{out_link, in_link, relation_type}` |
-| `EVA_LINK_RELATION_TYPE` | `related` | Relation type (instance-specific: `blocks`, `parent`, ...) |
+| `EVA_LINK_RELATION_TYPE` | — | Full id from `CmfRelationType.list`, e.g. `CmfRelationType:...` (system.link = «Взаимная»). Plain codes like `related` are rejected |
 | `EVA_TASK_ID_FIELD` / `_CODE_FIELD` | `id` / `code` | Task uuid / short code; code is used as `out_link`/`in_link` |
 | `EVA_TASK_TITLE_FIELD` / `_DESC_FIELD` / `_RESULT_FIELD` | `name` / `text` / `result` | Dotted paths of the text fields (Eva: `name`=заголовок, `text`=HTML-описание) |
 | `EVA_TASK_COMMENT_FIELD` / `_PARENT_PREFIX` | `text` / `CmfTask:` | Comment text field and task reference prefix |

@@ -66,6 +66,11 @@ type Config struct {
 	LinksDryRun            bool
 	WebhookToken           string
 
+	// Linker (polling alternative to the webhook: no inbound connectivity)
+	LinkerPollInterval     int // seconds
+	LinkerWatermarkFile    string
+	LinkerInitialLookback  int // hours, used until the first watermark is persisted
+
 	LogLevel string
 }
 
@@ -118,6 +123,9 @@ func Load() Config {
 		ListenerMaxLinks:        getInt("LISTENER_MAX_LINKS", 5),
 		LinksDryRun:             getBool("LINKS_DRY_RUN", true),
 		WebhookToken:            get("WEBHOOK_TOKEN", ""),
+		LinkerPollInterval:      getInt("LINKER_POLL_INTERVAL_SECONDS", 60),
+		LinkerWatermarkFile:     get("LINKER_WATERMARK_FILE", ""),
+		LinkerInitialLookback:   getInt("LINKER_INITIAL_LOOKBACK_HOURS", 24),
 		LogLevel:                get("LOG_LEVEL", "info"),
 	}
 	return cfg

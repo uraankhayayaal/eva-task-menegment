@@ -3,6 +3,7 @@ package similar
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sort"
@@ -296,7 +297,7 @@ func (s *Service) indexRaw(ctx context.Context, tasks []map[string]any) (int, er
 
 // IndexTask embeds a single task by its id and stores it in Qdrant.
 func (s *Service) IndexTask(ctx context.Context, id any) (*TaskDoc, error) {
-	raw, err := eva.GetTask(ctx, s.eva, s.cfg.TaskGetMethod, s.cfg.TaskGetFilterField, id)
+	raw, err := s.FindTask(ctx, id)
 	if err != nil {
 		return nil, err
 	}
@@ -313,6 +314,35 @@ func (s *Service) IndexTask(ctx context.Context, id any) (*TaskDoc, error) {
 	return doc, nil
 }
 
+// FindTask fetches a raw task by its identifier. It first filters on the
+// configured EVA_TASK_GET_FILTER_FIELD (default "id") and, if that finds
+// nothing, falls back to the code field so both a task uuid and its short
+// code (e.g. "SMOT-9860") resolve.
+func (s *Service) FindTask(ctx context.Context, id any) (map[string]any, error) {
+	fields := []string{s.cfg.TaskGetFilterField}
+	if s.cfg.TaskCodeField != "" && s.cfg.TaskCodeField != s.cfg.TaskGetFilterField {
+		fields = append(fields, s.cfg.TaskCodeField)
+	}
+	var lastErr error
+	for _, f := range fields {
+		raw, err := eva.GetTask(ctx, s.eva, s.cfg.TaskGetMethod, f, id)
+		if err == nil {
+			return raw, nil
+		}
+		if !errors.Is(err, eva.ErrTaskNotFound) {
+			// Only continue to the code fallback when the configured field
+			// matched nothing; transport/RPC errors are fatal.
+			return nil, err
+		}
+		lastErr = err
+	}
+	if lastErr != nil {
+		return nil, fmt.Errorf("%w: %v (tried fields: %s)", eva.ErrTaskNotFound, id, strings.Join(fields, ", "))
+	}
+	return nil, lastErr
+}
+
+// embedAndStore embeds text chunks of docs and upserts them into Qdrant.
 func (s *Service) embedAndStore(ctx context.Context, docs []*TaskDoc) error {
 	type taskChunk struct {
 		doc *TaskDoc

@@ -1,11 +1,16 @@
 package eva
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 )
+
+// ErrTaskNotFound is returned by GetTask when the filter matched no task.
+var ErrTaskNotFound = errors.New("task not found")
 
 // ListResult is the expected shape of a list call result. Depending on the
 // Eva endpoint the list may come back as a bare array or as an object with
@@ -79,7 +84,7 @@ func GetTask(ctx context.Context, c *Client, method, filterField string, id any)
 		return nil, err
 	}
 	if n == 0 || items == nil {
-		return nil, fmt.Errorf("task %v not found", id)
+		return nil, fmt.Errorf("%w: %v", ErrTaskNotFound, id)
 	}
 	return items[0], nil
 }
@@ -119,28 +124,27 @@ func LinkTasks(ctx context.Context, c *Client, method string, from, to any, link
 }
 
 func decodeItems(raw json.RawMessage) ([]map[string]any, int, error) {
-	// Pluck "result" from {"result": ...} wrappers.
-	if len(raw) > 0 && raw[0] == '{' {
-		var wrap struct {
-			Result json.RawMessage `json:"result"`
-		}
-		if err := json.Unmarshal(raw, &wrap); err == nil && len(wrap.Result) > 0 {
-			raw = wrap.Result
-		}
+	trimmed := bytes.TrimSpace(raw)
+	// A "null" result (or an empty body) means no rows, not an error.
+	if len(trimmed) == 0 || string(trimmed) == "null" {
+		return nil, 0, nil
 	}
-	if len(raw) > 0 && raw[0] == '[' {
+	// A bare array of records.
+	if trimmed[0] == '[' {
 		var items []map[string]any
-		if err := json.Unmarshal(raw, &items); err == nil {
-			return items, len(items), nil
+		if err := json.Unmarshal(trimmed, &items); err != nil {
+			return nil, 0, fmt.Errorf("decode list result: %w", err)
 		}
+		return items, len(items), nil
 	}
+	if trimmed[0] != '{' {
+		return nil, 0, fmt.Errorf("decode list result: unexpected shape %s", truncate(string(trimmed), 100))
+	}
+	// A list-shaped object: {"items": [...]}, {"rows": ...}, {"data": ...},
+	// {"list": ...}. A bare single object (e.g. a CmfTask.get hit) also
+	// unmarshals into ListResult but keeps every list field nil.
 	var lr ListResult
-	if err := json.Unmarshal(raw, &lr); err != nil {
-		// Some get responses return a bare object — wrap it.
-		var single map[string]any
-		if err2 := json.Unmarshal(raw, &single); err2 == nil {
-			return []map[string]any{single}, 1, nil
-		}
+	if err := json.Unmarshal(trimmed, &lr); err != nil {
 		return nil, 0, fmt.Errorf("decode list result: %w", err)
 	}
 	items := lr.Items
@@ -153,20 +157,39 @@ func decodeItems(raw json.RawMessage) ([]map[string]any, int, error) {
 	if len(items) == 0 {
 		items = lr.List
 	}
-	out := make([]map[string]any, 0, len(items))
-	for _, it := range items {
-		switch v := it.(type) {
-		case map[string]any:
-			out = append(out, v)
-		default:
-			b, err := json.Marshal(it)
-			if err == nil {
-				var m map[string]any
-				if err := json.Unmarshal(b, &m); err == nil {
-					out = append(out, m)
+	if len(items) > 0 {
+		out := make([]map[string]any, 0, len(items))
+		for _, it := range items {
+			switch v := it.(type) {
+			case map[string]any:
+				out = append(out, v)
+			default:
+				b, err := json.Marshal(it)
+				if err == nil {
+					var m map[string]any
+					if err := json.Unmarshal(b, &m); err == nil {
+						out = append(out, m)
+					}
 				}
 			}
 		}
+		return out, len(out), nil
 	}
-	return out, lr.Total, nil
+	// {"result": ...} wrapper — recurse only when the nested value is
+	// structured; a scalar "result" (a task's own result text) is not a
+	// wrapper.
+	var wrap struct {
+		Result json.RawMessage `json:"result"`
+	}
+	if err := json.Unmarshal(trimmed, &wrap); err == nil {
+		if sub := bytes.TrimSpace(wrap.Result); len(sub) > 0 && (sub[0] == '{' || sub[0] == '[') {
+			return decodeItems(wrap.Result)
+		}
+	}
+	// No list or wrapper shape -> a bare single record.
+	var single map[string]any
+	if err := json.Unmarshal(trimmed, &single); err == nil {
+		return []map[string]any{single}, 1, nil
+	}
+	return nil, 0, fmt.Errorf("decode list result: %q", string(trimmed))
 }
