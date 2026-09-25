@@ -37,6 +37,7 @@ type rpcRequest struct {
 	JSONRPC string         `json:"jsonrpc"`
 	Method  string         `json:"method"`
 	CallID  string         `json:"callid"`
+	Args    []any          `json:"args,omitempty"`
 	Kwargs  map[string]any `json:"kwargs"`
 }
 
@@ -114,11 +115,19 @@ func AuthMode(cfg config.Config) string {
 // Call dispatches a JSON-RPC 2.2 request for "Model.method" with the given
 // kwargs and decodes the "result" field into v (v must be a pointer).
 func (c *Client) Call(ctx context.Context, method string, kwargs map[string]any) (json.RawMessage, error) {
+	return c.CallRaw(ctx, method, nil, kwargs)
+}
+
+// CallRaw dispatches a JSON-RPC 2.2 request for "Model.method" with optional
+// positional args and kwargs (both are put top-level in the body). Some Eva
+// endpoints address their target via args[0] (e.g. CmfComment.update/delete).
+func (c *Client) CallRaw(ctx context.Context, method string, args []any, kwargs map[string]any) (json.RawMessage, error) {
 	url := c.endpoint(method)
 	reqBody := rpcRequest{
 		JSONRPC: "2.2",
 		Method:  method,
 		CallID:  randomUUID(),
+		Args:    args,
 		Kwargs:  kwargs,
 	}
 	if reqBody.Kwargs == nil {

@@ -46,6 +46,33 @@ type apiResponse struct {
 	Error  string          `json:"error"`
 }
 
+// LoadPayload returns the first point payload matching the Qdrant filter, or
+// ok=false when no point matches. Used to read a freshly stored content hash
+// back from an exact chunk point.
+func (c *Client) LoadPayload(ctx context.Context, name string, filter map[string]any) (map[string]any, bool, error) {
+	body := map[string]any{
+		"limit":        1,
+		"with_payload": true,
+		"with_vector":  false,
+		"filter":       filter,
+	}
+	raw, err := c.doRaw(ctx, http.MethodPost, "/collections/"+name+"/points/scroll", body)
+	if err != nil {
+		return nil, false, err
+	}
+	var resp scrollResponse
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return nil, false, err
+	}
+	if resp.Error != "" {
+		return nil, false, fmt.Errorf("qdrant scroll: %s", resp.Error)
+	}
+	if len(resp.Result.Points) == 0 || resp.Result.Points[0].Payload == nil {
+		return nil, false, nil
+	}
+	return resp.Result.Points[0].Payload, true, nil
+}
+
 // ExistingTaskIDs returns task IDs found in point payloads. It scrolls through
 // the collection once, which lets the indexer filter an Eva page without one
 // Qdrant request per task.
@@ -63,18 +90,36 @@ func (c *Client) ExistingTaskIDs(ctx context.Context, name string) (map[string]s
 	return ids, nil
 }
 
+// ExistingTaskIndexes returns task IDs found in point payloads together with
+// their indexed "modified_at" value. It lets an indexer detect tasks whose
+// Eva content (cmf_modified_at) moved past what was last embedded.
+func (c *Client) ExistingTaskIndexes(ctx context.Context, name string) (map[string]string, error) {
+	points, err := c.Scroll(ctx, name, []string{"eva_id", "modified_at"})
+	if err != nil {
+		return nil, err
+	}
+	indexes := make(map[string]string, len(points))
+	for _, point := range points {
+		if id := fmt.Sprint(point.Payload["eva_id"]); id != "" && id != "<nil>" {
+			indexes[id] = fmt.Sprint(point.Payload["modified_at"])
+		}
+	}
+	return indexes, nil
+}
+
+type scrollResult struct {
+	Points         []ScrolledPoint `json:"points"`
+	NextPageOffset json.RawMessage `json:"next_page_offset"`
+}
+
+type scrollResponse struct {
+	Result scrollResult `json:"result"`
+	Error  string       `json:"error"`
+}
+
 // Scroll walks the whole collection and returns every point's id together with
 // the requested payload fields (withVector is always false).
 func (c *Client) Scroll(ctx context.Context, name string, payloadFields []string) ([]ScrolledPoint, error) {
-	type scrollResult struct {
-		Points         []ScrolledPoint `json:"points"`
-		NextPageOffset json.RawMessage `json:"next_page_offset"`
-	}
-	type scrollResponse struct {
-		Result scrollResult `json:"result"`
-		Error  string       `json:"error"`
-	}
-
 	var out []ScrolledPoint
 	var offset json.RawMessage
 	for {

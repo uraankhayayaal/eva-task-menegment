@@ -17,13 +17,17 @@ type Config struct {
 	EvaLogin                string
 	EvaPassword             string
 	EvaAuthLoginURL         string
-	TaskListMethod           string
-	TaskGetMethod            string
-	TaskCommentsMethod       string
-	TaskCommentCreateMethod  string
-	TaskLinkMethod           string
+	TaskListMethod          string
+	TaskGetMethod           string
+	TaskCommentsMethod      string
+	TaskCommentCreateMethod string
+	TaskCommentUpdateMethod string
+	TaskLinkMethod          string
 	TaskIDField             string
+	TaskModifiedField       string
 	TaskCodeField           string
+	TaskCodeWhitelist       []string
+	TaskCodeBlacklist       []string
 	TaskGetFilterField      string
 	TaskTitleField          string
 	TaskDescField           string
@@ -68,10 +72,10 @@ type Config struct {
 	WebhookToken           string
 
 	// Linker (polling alternative to the webhook: no inbound connectivity)
-	LinkerPollInterval     int // seconds
-	LinkerWatermarkFile    string
-	LinkerInitialLookback  int    // hours, used until the first watermark is persisted
-	LinkerLinkMode         string // "comment" (default) | "link"
+	LinkerPollInterval    int // seconds
+	LinkerWatermarkFile   string
+	LinkerInitialLookback int    // hours, used until the first watermark is persisted
+	LinkerLinkMode        string // "comment" (default) | "link"
 
 	LogLevel string
 }
@@ -89,9 +93,13 @@ func Load() Config {
 		TaskGetMethod:           get("EVA_TASK_GET_METHOD", "CmfTask.get"),
 		TaskCommentsMethod:      get("EVA_TASK_COMMENTS_METHOD", "CmfComment.list"),
 		TaskCommentCreateMethod: get("EVA_TASK_COMMENT_CREATE_METHOD", "CmfComment.create"),
+		TaskCommentUpdateMethod: get("EVA_TASK_COMMENT_UPDATE_METHOD", "CmfComment.update"),
 		TaskLinkMethod:          get("EVA_TASK_LINK_METHOD", "CmfRelationOption.create"),
 		TaskIDField:             get("EVA_TASK_ID_FIELD", "id"),
+		TaskModifiedField:       get("EVA_TASK_MODIFIED_FIELD", "cmf_modified_at"),
 		TaskCodeField:           get("EVA_TASK_CODE_FIELD", "code"),
+		TaskCodeWhitelist:       split(get("EVA_TASK_CODE_WHITELIST", "SMAD-,SMOT-,RED-")),
+		TaskCodeBlacklist:       split(get("EVA_TASK_CODE_BLACKLIST", "SRE-")),
 		TaskGetFilterField:      get("EVA_TASK_GET_FILTER_FIELD", "id"),
 		TaskTitleField:          get("EVA_TASK_TITLE_FIELD", "name"),
 		TaskDescField:           get("EVA_TASK_DESC_FIELD", "text"),

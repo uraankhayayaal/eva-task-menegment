@@ -11,7 +11,9 @@ import (
 	"testing"
 
 	"evasimilar/internal/config"
+	"evasimilar/internal/embed"
 	"evasimilar/internal/eva"
+	"evasimilar/internal/qdrant"
 )
 
 // TestFindTaskCodeFallback verifies that a manual id that is a short code
@@ -92,5 +94,105 @@ func TestFindTaskNotFound(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "NOPE-0000") {
 		t.Errorf("error %q does not mention the id", err)
+	}
+}
+
+func TestTaskCodeLists(t *testing.T) {
+	svc := New(config.Config{
+		TaskCodeField:     "code",
+		TaskCodeWhitelist: []string{"SMAD-", "SMOT-", "RED-"},
+		TaskCodeBlacklist: []string{"SRE-"},
+	}, nil, nil, nil, slog.Default())
+	for _, tc := range []struct {
+		code string
+		want bool
+	}{
+		{code: "SMAD-123", want: true},
+		{code: "SMOT-123-extra", want: true},
+		{code: "RED-123", want: true},
+		{code: "SRE-123", want: false},
+		{code: "OTHER-123", want: false},
+		{code: "smot-123", want: false},
+		{code: "", want: false},
+	} {
+		if got := svc.taskActionAllowed(map[string]any{"code": tc.code}); got != tc.want {
+			t.Errorf("taskActionAllowed(%q) = %v, want %v", tc.code, got, tc.want)
+		}
+	}
+}
+
+func TestTaskCodeBlacklistOverridesWhitelist(t *testing.T) {
+	svc := New(config.Config{
+		TaskCodeField:     "code",
+		TaskCodeWhitelist: []string{"*"},
+		TaskCodeBlacklist: []string{"SRE-"},
+	}, nil, nil, nil, slog.Default())
+	if svc.taskActionAllowed(map[string]any{"code": "SMAD-1"}) != true {
+		t.Fatal("SMAD-1 should be allowed")
+	}
+	if svc.taskActionAllowed(map[string]any{"code": "SRE-1"}) != false {
+		t.Fatal("SRE-1 should be blocked")
+	}
+}
+
+func TestTaskCodeListsSkipActions(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var req struct {
+			Method string `json:"method"`
+		}
+		_ = json.Unmarshal(body, &req)
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case req.Method == "CmfTask.get":
+			io.WriteString(w, `{"jsonrpc":"2.0","result":{"id":"task-1","code":"SRE-1","name":"Test Task","text":"Description text","result":"Result"},"callid":"x"}`)
+		case req.Method == "CmfComment.list":
+			io.WriteString(w, `{"jsonrpc":"2.0","result":[],"callid":"x"}`)
+		default:
+			io.WriteString(w, `{"jsonrpc":"2.0","result":null,"callid":"x"}`)
+		}
+	}))
+	defer srv.Close()
+
+	embedMock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"model":"test","embedding":[0.0],"prompt_tokens":1}`)
+	}))
+	defer embedMock.Close()
+
+	qdrantMock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.Method + " " + r.URL.Path {
+		case "PUT /collections/eva_tasks_test", "GET /collections/eva_tasks_test":
+			io.WriteString(w, `{"status":"ok"}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer qdrantMock.Close()
+
+	ec := eva.New(srv.URL+"/api", "", "", "", "")
+	emb := embed.New("ollama", embedMock.URL, "test", "", 768)
+	qd := qdrant.New(qdrantMock.URL)
+	cfg := config.Config{
+		EvaRPCURL:         srv.URL + "/api",
+		TaskGetMethod:     "CmfTask.get",
+		TaskIDField:       "id",
+		TaskCodeField:     "code",
+		TaskCodeWhitelist: []string{"SMAD-", "SMOT-", "RED-"},
+		TaskCodeBlacklist: []string{"SRE-"},
+		QdrantCollection:  "eva_tasks_test",
+	}
+	svc := New(cfg, ec, emb, qd, slog.Default())
+
+	if err := svc.EnsureCollection(context.Background()); err != nil {
+		t.Fatalf("EnsureCollection: %v", err)
+	}
+
+	if _, _, err := svc.FindAndLink(context.Background(), "task-1"); err != nil {
+		t.Fatalf("FindAndLink: %v", err)
+	}
+	if _, _, err := svc.CommentTask(context.Background(), "task-1"); err != nil {
+		t.Fatalf("CommentTask: %v", err)
 	}
 }

@@ -123,6 +123,16 @@ func CreateComment(ctx context.Context, c *Client, method, parent, text string) 
 	return nil
 }
 
+// UpdateComment rewrites the text of an existing comment via CmfComment.update.
+// Eva addresses the target comment through args[0]; the kwargs only carry the
+// new text. commentID must be the full reference ("CmfComment:<uuid>").
+func UpdateComment(ctx context.Context, c *Client, method, commentID, text string) error {
+	if _, err := c.CallRaw(ctx, method, []any{commentID}, map[string]any{"text": text}); err != nil {
+		return err
+	}
+	return nil
+}
+
 // LinkTasks asks Eva to create a relation between two tasks via
 // CmfRelationOption.create with kwargs {out_link, in_link, relation_type}.
 func LinkTasks(ctx context.Context, c *Client, method string, from, to any, linkType string) error {

@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 )
 
@@ -39,5 +40,18 @@ REAL=from-file
 			t.Errorf("%s = %q, want %q", c.key, got, c.want)
 		}
 		os.Unsetenv(c.key)
+	}
+}
+
+func TestLoadTaskCodeLists(t *testing.T) {
+	t.Setenv("EVA_TASK_CODE_WHITELIST", "")
+	t.Setenv("EVA_TASK_CODE_BLACKLIST", "")
+
+	cfg := Load()
+	if want := []string{"SMAD-", "SMOT-", "RED-"}; !reflect.DeepEqual(cfg.TaskCodeWhitelist, want) {
+		t.Errorf("TaskCodeWhitelist = %v, want %v", cfg.TaskCodeWhitelist, want)
+	}
+	if want := []string{"SRE-"}; !reflect.DeepEqual(cfg.TaskCodeBlacklist, want) {
+		t.Errorf("TaskCodeBlacklist = %v, want %v", cfg.TaskCodeBlacklist, want)
 	}
 }

@@ -14,9 +14,9 @@ Eva webhook ────────► listener ──► embed + vector search
 
 | Binary          | Role                                                                |
 |-----------------|---------------------------------------------------------------------|
-| `cmd/indexer`   | Continuously reads new tasks (+ comments) from Eva and upserts them |
+| `cmd/indexer`   | Continuously reads new/changed tasks (+ comments) from Eva and upserts them |
 | `cmd/listener`  | HTTP webhook server: on a new task, finds similar ones and links them |
-| `cmd/linker`    | Polling listener (no webhook/NAT needed): scans new tasks, finds + links |
+| `cmd/linker`    | Polling listener (no webhook/NAT needed): scans new/changed tasks, finds + links/comments |
 | `cmd/dedup`     | One-shot: finds and (optionally) deletes duplicate points in Qdrant |
 
 ## Prerequisites
@@ -57,14 +57,20 @@ No webhook? Use the poller instead (outbound-only, works behind NAT/VPN):
 ```bash
 LINKER_WATERMARK_FILE=watermark.json go run ./cmd/linker
 ```
-It scans `CmfTask.list` every `LINKER_POLL_INTERVAL_SECONDS` for tasks created
-after the persisted watermark and processes each — same matching logic as the
-webhook path, minus the inbound endpoint. The first run starts from
+It scans `CmfTask.list` every `LINKER_POLL_INTERVAL_SECONDS` for tasks whose
+`cmf_modified_at` is newer than the persisted watermark and processes each —
+same matching logic as the webhook path, minus the inbound endpoint. Because
+`cmf_modified_at >= cmf_created_at`, tasks **created title-only and enriched
+later** (description added, title renamed — common with Eva) are picked up
+again, re-indexed, and their «Автолинкер» comment is **refreshed in place**
+instead of duplicated. The first run starts from
 `LINKER_INITIAL_LOOKBACK_HOURS` and saves a watermark so restarts only reprocess
-genuinely new tasks.
+genuinely new/changed tasks.
 
 By default the linker does **not** create Eva relations: it posts an
 «Автолинкер» comment on the task listing its similar tasks (`LINKER_LINK_MODE=comment`).
+A re-run updates that comment (via `EVA_TASK_COMMENT_UPDATE_METHOD=CmfComment.update`)
+only when the task's content moved past it, so edits never spam duplicates.
 To restore relation creation in the linker set `LINKER_LINK_MODE=link`; the
 listener's `/link` and `/webhook/task` always create relations regardless.
 
@@ -80,14 +86,17 @@ go run ./cmd/dedup -apply                # actually delete the duplicates
 
 1. `indexer` continuously pages through Eva tasks via
    `POST <EVA_RPC_URL>/?m=CmfTask.list` (kwargs: `filter`, `fields`, `slice`, `order_by`),
-   compares task IDs with Qdrant and skips tasks that are already indexed,
-   fetches new tasks' comments via `CmfComment.list` (filter
+   compares task IDs (and their `cmf_modified_at`) with Qdrant and skips tasks
+   that are already indexed **and unchanged**; a task whose content moved past
+   the stored `modified_at` payload is re-embedded, so edits to a title or a
+   later-added description refresh the vectors without a full rebuild.
+   It fetches candidate tasks' comments via `CmfComment.list` (filter
    `parent == CmfTask:<id>`), chunks the text (`name + text + result +
    comments`) semantically, embeds each chunk and upserts the points into the
    Qdrant collection `eva_tasks` (point id = hash of task id + chunk index,
-   payload keeps `eva_id`/`code`/`chunk_index`).
+   payload keeps `eva_id`/`code`/`chunk_index`/`modified_at`).
    After a complete scan it waits one minute and checks Eva again, so newly
-   created tasks are picked up without restarting the process.
+   created or changed tasks are picked up without restarting the process.
 2. `listener` accepts `POST /webhook/task`. It extracts the task id from the
    payload (`LISTENER_TASK_ID_PATH`, dotted path, e.g. `task.id`), indexes the
    task, then runs a Qdrant cosine search with every chunk of the new task for
@@ -121,8 +130,12 @@ Everything instance-specific is config:
 | `EVA_TASK_LINK_METHOD` | `CmfRelationOption.create` | kwargs `{out_link, in_link, relation_type}` |
 | `EVA_LINK_RELATION_TYPE` | — | Full id from `CmfRelationType.list`, e.g. `CmfRelationType:...` (system.link = «Взаимная»). Plain codes like `related` are rejected |
 | `EVA_TASK_ID_FIELD` / `_CODE_FIELD` | `id` / `code` | Task uuid / short code; code is used as `out_link`/`in_link` |
+| `EVA_TASK_CODE_WHITELIST` | `SMAD-,SMOT-,RED-` | Comma-separated task code prefixes allowed for linking and commenting |
+| `EVA_TASK_CODE_BLACKLIST` | `SRE-` | Comma-separated task code prefixes denied for linking and commenting; takes precedence over the whitelist |
 | `EVA_TASK_TITLE_FIELD` / `_DESC_FIELD` / `_RESULT_FIELD` | `name` / `text` / `result` | Dotted paths of the text fields (Eva: `name`=заголовок, `text`=HTML-описание) |
 | `EVA_TASK_COMMENT_FIELD` / `_PARENT_PREFIX` | `text` / `CmfTask:` | Comment text field and task reference prefix |
+| `EVA_TASK_MODIFIED_FIELD` | `cmf_modified_at` | Timestamp of the last content change: drives re-indexing of edited tasks (indexer + linker) |
+| `EVA_TASK_COMMENT_UPDATE_METHOD` | `CmfComment.update` | Refreshes an existing «Автолинкер» comment in place (target passed via `args[0]`) |
 | `EVA_TASK_PAYLOAD_FIELDS` | `number,project_id,status` | Extra fields copied into the vector payload |
 
 The exact model/method names and field layout depend on your Eva version; the

@@ -2,6 +2,8 @@ package similar
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -32,6 +34,8 @@ type TaskDoc struct {
 	Description  string
 	Result       string
 	Comments     []string
+	ModifiedAt   string // Eva cmf_modified_at at embed time
+	ContentHash  string // fingerprint of the embedded content (livelock guard)
 	Payload      map[string]any
 	Chunks       []string
 	ChunkVectors [][]float32
@@ -60,6 +64,32 @@ func New(cfg config.Config, ec *eva.Client, emb *embed.Client, qc *qdrant.Client
 	return &Service{cfg: cfg, eva: ec, embed: emb, qd: qc, log: log}
 }
 
+func (s *Service) taskActionAllowed(raw map[string]any) bool {
+	code := strings.TrimSpace(strp(lookup(raw, s.cfg.TaskCodeField)))
+	if code == "" {
+		return false
+	}
+	for _, prefix := range s.cfg.TaskCodeBlacklist {
+		if matchesTaskCodePrefix(code, prefix) {
+			return false
+		}
+	}
+	if len(s.cfg.TaskCodeWhitelist) == 0 {
+		return true
+	}
+	for _, prefix := range s.cfg.TaskCodeWhitelist {
+		if matchesTaskCodePrefix(code, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func matchesTaskCodePrefix(code, prefix string) bool {
+	prefix = strings.TrimSpace(prefix)
+	return prefix != "" && (prefix == "*" || strings.HasPrefix(code, prefix))
+}
+
 // EnsureCollection creates the Qdrant collection for tasks.
 func (s *Service) EnsureCollection(ctx context.Context) error {
 	return s.qd.EnsureCollection(ctx, s.cfg.QdrantCollection, s.embed.Dim(), s.cfg.QdrantDistance)
@@ -77,12 +107,13 @@ func (s *Service) IndexAll(ctx context.Context) error {
 		s.recreateDone = true
 	}
 	existingScanStarted := time.Now()
-	existing, err := s.qd.ExistingTaskIDs(ctx, s.cfg.QdrantCollection)
+	existing, err := s.qd.ExistingTaskIndexes(ctx, s.cfg.QdrantCollection)
 	if err != nil {
 		return fmt.Errorf("read indexed tasks: %w", err)
 	}
 	s.log.Info("loaded indexed task IDs", "tasks", len(existing), "duration", time.Since(existingScanStarted))
 	newCandidates := 0
+	updatedCandidates := 0
 	skipped := 0
 	var indexedThisRun atomic.Int64
 	var qdrantPointCount atomic.Int64
@@ -189,7 +220,7 @@ func (s *Service) IndexAll(ctx context.Context) error {
 		}
 		filter := s.cfg.TaskListFilter
 		pageStarted := time.Now()
-		tasks, _, err := eva.ListTasks(workCtx, s.eva, s.cfg.TaskListMethod, filter, s.cfg.TaskListFields, page*pageSize, pageSize)
+		tasks, _, err := eva.ListTasks(workCtx, s.eva, s.cfg.TaskListMethod, filter, addField(s.cfg.TaskListFields, s.cfg.TaskModifiedField), page*pageSize, pageSize)
 		pageDuration := time.Since(pageStarted)
 		if err != nil {
 			s.log.Warn("Eva task page request failed", "offset", page*pageSize, "duration", pageDuration, "err", err)
@@ -202,6 +233,8 @@ func (s *Service) IndexAll(ctx context.Context) error {
 			break
 		}
 		tasksSeen += int64(len(tasks))
+		pageNew := 0
+		pageUpdated := 0
 		newTasks := make([]map[string]any, 0, len(tasks))
 		for _, task := range tasks {
 			id := strp(lookup(task, s.cfg.TaskIDField))
@@ -209,14 +242,24 @@ func (s *Service) IndexAll(ctx context.Context) error {
 				newTasks = append(newTasks, task)
 				continue
 			}
-			if _, ok := existing[id]; ok {
-				skipped++
+			if indexedMod, ok := existing[id]; ok {
+				current := strp(lookup(task, s.cfg.TaskModifiedField))
+				if current != "" && current != indexedMod {
+					// Task content moved past what we embedded: refresh it.
+					pageUpdated++
+					updatedCandidates++
+					newTasks = append(newTasks, task)
+				} else {
+					skipped++
+				}
 				continue
 			}
+			pageNew++
+			newCandidates++
 			newTasks = append(newTasks, task)
 		}
 		s.log.Info("read task page", "offset", page*pageSize, "page_size", len(tasks), "eva_request_duration", pageDuration,
-			"new", len(newTasks), "tasks_seen", tasksSeen, "eva_total", evaTotal)
+			"new", pageNew, "updated", pageUpdated, "tasks_seen", tasksSeen, "eva_total", evaTotal)
 		pendingTasks = append(pendingTasks, newTasks...)
 		// Wait until there is work for all workers before dispatching. This
 		// avoids a single 100-task Eva page occupying just one worker.
@@ -225,8 +268,7 @@ func (s *Service) IndexAll(ctx context.Context) error {
 		}
 		for _, task := range newTasks {
 			if id := strp(lookup(task, s.cfg.TaskIDField)); id != "" {
-				existing[id] = struct{}{}
-				newCandidates++
+				existing[id] = strp(lookup(task, s.cfg.TaskModifiedField))
 			}
 		}
 		if len(tasks) < pageSize {
@@ -260,6 +302,7 @@ func (s *Service) IndexAll(ctx context.Context) error {
 		"eva_tasks_seen", tasksSeen,
 		"eva_total", evaTotal,
 		"new_candidates", newCandidates,
+		"updated_candidates", updatedCandidates,
 		"already_indexed", skipped,
 	)
 	return nil
@@ -301,12 +344,16 @@ func (s *Service) IndexTask(ctx context.Context, id any) (*TaskDoc, error) {
 	if err != nil {
 		return nil, err
 	}
+	return s.indexRawTask(ctx, raw)
+}
+
+func (s *Service) indexRawTask(ctx context.Context, raw map[string]any) (*TaskDoc, error) {
 	doc, err := s.normalize(ctx, raw)
 	if err != nil {
 		return nil, err
 	}
 	if len(doc.Chunks) == 0 {
-		return nil, fmt.Errorf("task %v has no text", id)
+		return nil, fmt.Errorf("task %v has no text", strp(lookup(raw, s.cfg.TaskIDField)))
 	}
 	if err := s.embedAndStore(ctx, []*TaskDoc{doc}); err != nil {
 		return nil, err
@@ -421,6 +468,12 @@ func (s *Service) chunkPoint(d *TaskDoc, idx int, vector []float32, keepLinks []
 	if d.Code != "" {
 		payload["code"] = d.Code
 	}
+	if d.ModifiedAt != "" {
+		payload["modified_at"] = d.ModifiedAt
+	}
+	if d.ContentHash != "" {
+		payload["content_hash"] = d.ContentHash
+	}
 	payload["chunk_index"] = idx
 	payload["chunk_count"] = len(d.Chunks)
 	if keepLinks != nil {
@@ -497,9 +550,17 @@ func (s *Service) FindSimilar(ctx context.Context, doc *TaskDoc) ([]Match, error
 // IndexAndFind indexes a task (embedding + Qdrant upsert) and returns its
 // closest matches without creating any relations.
 func (s *Service) IndexAndFind(ctx context.Context, taskID any) (*TaskDoc, []Match, error) {
-	doc, err := s.IndexTask(ctx, taskID)
+	raw, err := s.FindTask(ctx, taskID)
 	if err != nil {
 		return nil, nil, err
+	}
+	doc, err := s.indexRawTask(ctx, raw)
+	if err != nil {
+		return nil, nil, err
+	}
+	if !s.taskActionAllowed(raw) {
+		s.log.Debug("skip task actions by code policy", "id", doc.ID, "code", doc.Code)
+		return doc, nil, nil
 	}
 	matches, err := s.FindSimilar(ctx, doc)
 	if err != nil {
@@ -566,6 +627,7 @@ func (s *Service) normalize(ctx context.Context, raw map[string]any) (*TaskDoc, 
 		Title:       strp(lookup(raw, s.cfg.TaskTitleField)),
 		Description: strp(lookup(raw, s.cfg.TaskDescField)),
 		Result:      strp(lookup(raw, s.cfg.TaskResultField)),
+		ModifiedAt:  strp(lookup(raw, s.cfg.TaskModifiedField)),
 	}
 	in, err := eva.ListComments(ctx, s.eva, s.cfg.TaskCommentsMethod, s.cfg.TaskCommentParentPrefix, s.cfg.TaskCommentsFields, id)
 	if err != nil {
@@ -573,9 +635,13 @@ func (s *Service) normalize(ctx context.Context, raw map[string]any) (*TaskDoc, 
 	} else {
 		for _, c := range in {
 			t := textutil.Clean(strp(lookup(c, s.cfg.TaskCommentField)))
-			if t != "" {
-				doc.Comments = append(doc.Comments, t)
+			if t == "" || strings.Contains(t, linkCommentMarker) {
+				// The «Автолинкер» comment is our own output: it must never
+				// drive the embedding or the content fingerprint, otherwise
+				// refreshing it would re-trigger processing forever.
+				continue
 			}
+			doc.Comments = append(doc.Comments, t)
 		}
 	}
 	payload := map[string]any{}
@@ -586,6 +652,7 @@ func (s *Service) normalize(ctx context.Context, raw map[string]any) (*TaskDoc, 
 	}
 	doc.Payload = payload
 	doc.Chunks = s.buildChunks(doc)
+	doc.ContentHash = contentFingerprint(doc.Title, doc.Description, doc.Result, doc.Comments)
 	return doc, nil
 }
 
@@ -675,4 +742,29 @@ func toStrings(v any) []string {
 	default:
 		return nil
 	}
+}
+
+// contentFingerprint produces a stable hash of the task material that was
+// actually embedded. It is stored in the Qdrant payload ("content_hash") and
+// used to skip re-processing: whenever Eva bumps cmf_modified_at without the
+// embedded content changing (e.g. because refreshing an «Автолинкер» comment
+// itself advances the task timestamp), the comment flow does no re-embed and
+// no re-write, which would otherwise livelock.
+//
+// Comments are sorted before hashing so a re-ordered comment list keeps the
+// same fingerprint.
+func contentFingerprint(title, desc, result string, comments []string) string {
+	parts := []string{title, desc, result}
+	cm := make([]string, len(comments))
+	copy(cm, comments)
+	sort.Strings(cm)
+	for _, c := range cm {
+		parts = append(parts, c)
+	}
+	b, err := json.Marshal(parts)
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
 }
