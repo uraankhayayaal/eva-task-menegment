@@ -178,6 +178,9 @@ func TestTaskCodeListsSkipActions(t *testing.T) {
 		EvaRPCURL:         srv.URL + "/api",
 		TaskGetMethod:     "CmfTask.get",
 		TaskIDField:       "id",
+		TaskTitleField:    "name",
+		TaskDescField:     "text",
+		TaskResultField:   "result",
 		TaskCodeField:     "code",
 		TaskCodeWhitelist: []string{"SMAD-", "SMOT-", "RED-"},
 		TaskCodeBlacklist: []string{"SRE-"},
@@ -189,10 +192,13 @@ func TestTaskCodeListsSkipActions(t *testing.T) {
 		t.Fatalf("EnsureCollection: %v", err)
 	}
 
-	if _, _, err := svc.FindAndLink(context.Background(), "task-1"); err != nil {
-		t.Fatalf("FindAndLink: %v", err)
+	_, _, err := svc.FindAndLink(context.Background(), "task-1")
+	if err == nil {
+		t.Fatalf("ожидалась ошибка блокировки по Blacklist для FindAndLink, но ошибка не возвращена")
 	}
-	if _, _, err := svc.CommentTask(context.Background(), "task-1"); err != nil {
-		t.Fatalf("CommentTask: %v", err)
+
+	_, _, err = svc.CommentTask(context.Background(), "task-1")
+	if err == nil {
+		t.Fatalf("ожидалась ошибка блокировки по Blacklist для CommentTask, но ошибка не возвращена")
 	}
 }
